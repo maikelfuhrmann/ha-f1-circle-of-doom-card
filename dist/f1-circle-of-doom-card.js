@@ -1,4 +1,4 @@
-/* F1 Circle of Doom Card v0.2.3 | MIT | maikelfuhrmann */
+/* F1 Circle of Doom Card v0.3.0 | MIT | maikelfuhrmann */
 /** Green defaults: Formula1.com race previews. VSC: heuristic 65% of green,
  * rounded to 0.1s; not measured VSC data. See docs/presets.md. */
 const CIRCUITS = [
@@ -333,6 +333,24 @@ function seconds(value) {
   return match ? Number(match[1]) * 60 + Number(match[2]) : null;
 }
 
+function lapDeficit(value) {
+  const match = String(value ?? '').trim().match(/^\+?\s*([1-9]\d*)\s*(?:l|laps?|runden?)$/i);
+  return match ? Number(match[1]) : 0;
+}
+
+// Keep classification gaps unwrapped. Only a numeric interval can recover a
+// missing gap; a lap label alone is never converted using an assumed lap time.
+function resolveGaps(drivers) {
+  return drivers.reduce((resolved, driver) => {
+    const previous = resolved.at(-1);
+    const chained = driver.gap === null && previous?.gap != null &&
+      driver.position === previous.position + 1 && Number.isFinite(driver.interval);
+    resolved.push({ ...driver, gap: chained ? previous.gap + driver.interval : driver.gap,
+      gapSource: chained ? 'intervals' : driver.gap === null ? 'missing' : 'timing' });
+    return resolved;
+  }, []);
+}
+
 function normaliseDrivers(input) {
   if (!Array.isArray(input)) return [];
   return input.filter(d => d && typeof d === 'object').map(d => ({
@@ -345,7 +363,9 @@ function normaliseDrivers(input) {
     gapLabel: String(d.gap_to_leader ?? ''),
     // "Lap 12" is the leader's current lap, whereas "+1 LAP" is a deficit.
     // Unknown text remains a missing gap; never interpret a lap counter as lapping.
-    lapped: /^\+?\s*[1-9]\d*\s*(?:laps?|runden?)$/i.test(String(d.gap_to_leader ?? '').trim()),
+    lapped: lapDeficit(d.gap_to_leader) > 0,
+    lapsBehind: lapDeficit(d.gap_to_leader),
+    interval: seconds(d.interval_to_position_ahead),
     retired: d.retired === true || d.status === 'out',
     inPit: d.in_pit === true || d.pit_out === true || ['pit_in', 'pit_out'].includes(d.status),
     stopped: d.stopped === true,
@@ -410,12 +430,24 @@ function project(drivers, selected, loss, uncertainty) {
   };
 }
 
+function trafficNeighbors(drivers, selected, target, lap) {
+  const wrap = value => ((value % lap) + lap) % lap;
+  const traffic = drivers.filter(d => d.id !== selected.id).map(driver => {
+    const offset = wrap(target - driver.gap);
+    const tied = offset < 0.001 || lap - offset < 0.001;
+    return { driver, aheadGap: tied ? 0 : offset, behindGap: tied ? 0 : lap - offset };
+  });
+  const nearest = key => [...traffic].sort((a,b) => Math.abs(a[key]-b[key]) < 0.001 ? a.driver.position-b.driver.position : a[key]-b[key])[0];
+  const ahead = nearest('aheadGap'), behind = nearest('behindGap');
+  return { ahead: ahead?.driver, behind: behind?.driver, aheadGap: ahead?.aheadGap, behindGap: behind?.behindGap };
+}
+
 function buildModel(states, config, selectedId, now = Date.now(), overrides = {}) {
   const timing = states?.[config.entity];
   const session = states?.[config.session_entity];
   const status = states?.[config.session_status_entity];
   const track = states?.[config.track_status_entity];
-  const drivers = normaliseDrivers(timing?.attributes?.drivers).filter(d => !d.retired);
+  const drivers = resolveGaps(normaliseDrivers(timing?.attributes?.drivers)).filter(d => !d.retired);
   const selected = drivers.find(d => d.id === String(selectedId ?? config.driver ?? '')) ?? drivers[0];
   const settings = pitSettings(states, config, overrides);
   const base = { drivers, selected, settings, ready: false, lap: null, prediction: null,
@@ -434,21 +466,21 @@ function buildModel(states, config, selectedId, now = Date.now(), overrides = {}
   if (updated === null || now - updated > config.stale_after * 1000 || updated > now + 10000) return stop('stale', 'Timing data is stale or has no valid timestamp. Prediction paused.');
   if (drivers.length < 2) return stop('empty', 'Waiting for driver gaps.');
   if (drivers.some((d, i) => !d.id || d.position !== i + 1) || new Set(drivers.map(d => d.id)).size !== drivers.length) return stop('order', 'The running order is incomplete. Prediction paused.');
-  if (drivers.some(d => d.lapped)) return stop('lapped', 'Lapped cars in the field: A reliable rejoin prediction requires precise lap tracking.');
-  if (drivers.some(d => d.gap === null)) return stop('gaps', 'Time gaps are missing. Prediction paused until all active drivers can be placed.');
+  if (drivers.some(d => d.gap === null)) return stop('gaps', 'A time gap or numeric interval is missing. Lap labels alone cannot locate traffic. Waiting for complete timing.');
   if (drivers.some((d, i) => i > 0 && d.gap < drivers[i - 1].gap)) return stop('order', 'Time gaps and running order are not yet in sync.');
   if (drivers.some(d => d.inPit || d.stopped)) return stop('pit', 'A driver is in the pits, exiting the pits or stopped. Waiting for the running order to settle.');
   base.lap = referenceLap(drivers[0], config.reference_lap_seconds);
   if (base.lap === null) return stop('pace', 'Waiting for at least two usable lap times from the leader.');
-  if (drivers.some(d => d.gap >= base.lap) || selected.gap + settings.loss + config.uncertainty >= base.lap) return stop('lap_boundary', 'The window exceeds one reference lap. Prediction paused due to possible lapping.');
   return { ...base, ready: true, reason: 'estimate', message: settings.mode === 'vsc' ? 'VSC scenario · assumes VSC stays active for the entire stop.' : 'Estimate from time gaps · not GPS',
-    prediction: project(drivers, selected, settings.loss, config.uncertainty) };
+    prediction: project(drivers, selected, settings.loss, config.uncertainty),
+    traffic: trafficNeighbors(drivers, selected, selected.gap + settings.loss, base.lap),
+    recovered: drivers.filter(d => d.gapSource === 'intervals').length };
 }
 
 // Labels are spread independently of the timing markers. Markers never move off
 // their true time-gap angle, even when several cars have nearly identical gaps.
 function circlePoint(seconds, lap, radius = 125) {
-  const angle = seconds / lap * Math.PI * 2 - Math.PI / 2;
+  const angle = ((seconds % lap) + lap) % lap / lap * Math.PI * 2 - Math.PI / 2;
   return [220 + radius * Math.cos(angle), 220 + radius * Math.sin(angle)];
 }
 
@@ -469,14 +501,24 @@ function circleLabels(drivers, lap) {
   return items;
 }
 
+// Split at half-circle lengths, including a complete revolution and windows
+// crossing twelve o'clock. SVG's single arc cannot represent a full circle.
+function circleArc(start, end, lap, radius = 125) {
+  const span = Math.min(Math.max(0, end - start), lap);
+  const count = Math.max(1, Math.ceil(span / (lap / 2)));
+  let path = `M ${circlePoint(start, lap, radius).join(' ')}`;
+  for (let i = 1; i <= count; i++) {
+    const p = circlePoint(start + span * i / count, lap, radius);
+    path += ` A ${radius} ${radius} 0 0 1 ${p.join(' ')}`;
+  }
+  return path;
+}
+
 
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const fixed = value => Number(value).toFixed(1);
 const point = circlePoint;
-const arc = (start, end, lap) => {
-  const a = point(start, lap), b = point(end, lap);
-  return `M ${a.join(' ')} A 125 125 0 ${end - start > lap / 2 ? 1 : 0} 1 ${b.join(' ')}`;
-};
+const arc = circleArc;
 
 class F1CircleOfDoomCard extends HTMLElement {
   constructor() {
@@ -571,7 +613,7 @@ class F1CircleOfDoomCard extends HTMLElement {
     // Preserve input while typing, but invalidate unsafe/stale predictions immediately.
     if (m.ready && this._model?.ready && settings.id === this._model.settings.id && settings.mode === this._model.settings.mode && this._renderingInput && ['INPUT', 'SELECT'].includes(this.shadowRoot.activeElement?.tagName)) return;
     this._model = m;
-    const p = m.prediction;
+    const p = m.prediction, traffic = m.traffic;
     const option = d => `<option value="${escapeHtml(d.id)}" ${d.id === m.selected?.id ? 'selected' : ''}>P${d.position} · ${escapeHtml(d.code)} — ${escapeHtml(d.name)}</option>`;
     const stamp = m.updated ? new Date(m.updated).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
     this.shadowRoot.innerHTML = `<style>${STYLES}</style>
@@ -588,13 +630,13 @@ class F1CircleOfDoomCard extends HTMLElement {
           <section class="insights" aria-label="Rejoin estimate">
             <div class="eyebrow">ESTIMATED AFTER THE STOP</div>
             <div class="result">${p ? `~P${p.rank}` : '—'}<span>${p ? `P${p.best}–P${p.worst} with uncertainty` : 'No prediction yet'}</span></div>
-            ${p ? `<div class="calculation"><div><span>Current gap</span><b>${fixed(m.selected.gap)} s</b></div><div><span>+ Pit loss</span><b>${fixed(c.pit_loss)} s</b></div><div><span>= Rejoin offset</span><b>${fixed(p.target)} s</b></div><small>Relative to the current leader · ${p.rank - 1} ${p.rank === 2 ? 'car' : 'cars'} ahead after this stop</small></div><div class="neighbors"><div><small>AHEAD</small><strong>${p.ahead ? escapeHtml(p.ahead.code) : 'Clear track'}</strong><span>${p.ahead ? `${fixed(p.aheadGap)} s gap` : 'Nobody ahead'}</span></div><div><small>BEHIND</small><strong>${p.behind ? escapeHtml(p.behind.code) : 'Back of field'}</strong><span>${p.behind ? `${fixed(p.behindGap)} s gap` : 'Nobody behind'}</span></div></div>` : ''}
-            ${p ? `<div class="order-heading">Estimated order around rejoin</div><ol class="rejoin-order" aria-label="Estimated order after the stop">${p.order.filter(d => Math.abs(d.projectedPosition-p.rank)<=2).map(d=>`<li class="${d.selected?'focus':''}"><b>P${d.projectedPosition}</b><span>${escapeHtml(d.code)}${d.selected?' · after stop':''}</span><small>now P${d.position}</small></li>`).join('')}</ol>` : ''}
-            <p class="notice ${m.ready ? '' : 'waiting'}" role="status">${escapeHtml(m.message)}</p>
+            ${p ? `<div class="calculation"><div><span>Current gap</span><b>${fixed(m.selected.gap)} s</b></div><div><span>+ Pit loss</span><b>${fixed(c.pit_loss)} s</b></div><div><span>= Rejoin offset</span><b>${fixed(p.target)} s</b></div><small>Relative to the current leader · ${p.rank - 1} ${p.rank === 2 ? 'car' : 'cars'} ahead after this stop</small></div><div class="order-heading">Estimated traffic at rejoin · wrapped timing</div><div class="neighbors"><div><small>AHEAD ON CIRCLE</small><strong>${traffic.ahead ? escapeHtml(traffic.ahead.code)+' · P'+traffic.ahead.position : 'Clear track'}</strong><span>${traffic.ahead ? `${fixed(traffic.aheadGap)} s gap` : 'Nobody ahead'}</span></div><div><small>BEHIND ON CIRCLE</small><strong>${traffic.behind ? escapeHtml(traffic.behind.code)+' · P'+traffic.behind.position : 'Back of field'}</strong><span>${traffic.behind ? `${fixed(traffic.behindGap)} s gap` : 'Nobody behind'}</span></div></div>` : ''}
+            ${p ? `<div class="order-heading">Estimated race order after stop</div><ol class="rejoin-order" aria-label="Estimated order after the stop">${p.order.filter(d => Math.abs(d.projectedPosition-p.rank)<=2).map(d=>`<li class="${d.selected?'focus':''}"><b>P${d.projectedPosition}</b><span>${escapeHtml(d.code)}${d.selected?' · after stop':''}</span><small>now P${d.position}</small></li>`).join('')}</ol>` : ''}
+            <p class="notice ${m.ready ? '' : 'waiting'}" role="status">${escapeHtml(m.message)}</p>${m.recovered ? `<p class="assumption">${m.recovered} gap${m.recovered===1?'':'s'} recovered from numeric intervals. Circular traffic uses the reference lap and may differ from actual track spacing.</p>` : ''}
             <p class="assumption">Assumed total loss: ${fixed(c.pit_loss)} ± ${fixed(c.uncertainty)} s relative to staying on track, including pit lane and tyre service. ${settings.mode === 'vsc' ? 'VSC transitions can invalidate this scenario.' : 'Adjust to current conditions.'}</p>
           </section>
         </div>
-        ${m.ready ? `<details><summary>Drivers and gaps</summary><div class="driver-grid">${m.drivers.map(d => `<button data-driver="${escapeHtml(d.id)}" class="driver-row ${d.id === m.selected.id ? 'selected' : ''}" style="--team:${d.color}"><b>P${d.position} ${escapeHtml(d.code)}</b><span>${d.position === 1 ? 'Leader' : `+${fixed(d.gap)} s`}</span></button>`).join('')}</div></details>` : ''}
+        ${m.ready ? `<details><summary>Drivers and gaps</summary><div class="driver-grid">${m.drivers.map(d => `<button data-driver="${escapeHtml(d.id)}" class="driver-row ${d.id === m.selected.id ? 'selected' : ''}" style="--team:${d.color}"><b>P${d.position} ${escapeHtml(d.code)}</b><span>${d.position === 1 ? 'Leader' : `+${fixed(d.gap)} s${d.lapsBehind ? ' · +'+d.lapsBehind+'L' : ''}${d.gapSource==='intervals'?' ≈':''}`}</span></button>`).join('')}</div></details>` : ''}
         <footer><span>Time-gap circle · not GPS</span><span>${m.lap ? `Reference lap ${fixed(m.lap)} s · ` : ''}Updated ${stamp}</span></footer>
       </ha-card>`;
     // Keep editable controls stable during unrelated HA changes and defer updates while typing.
@@ -620,10 +662,10 @@ class F1CircleOfDoomCard extends HTMLElement {
     const labels = new Map(circleLabels(m.drivers, m.lap).map(l => [l.id, l]));
     const markers = m.drivers.map(d => {
       const l = labels.get(d.id), selected = d.id === m.selected.id;
-      return `<g data-driver="${escapeHtml(d.id)}" role="button" tabindex="0" aria-label="${escapeHtml(d.code)}, Position ${d.position}, ${fixed(d.gap)} seconds behind" class="marker"><title>P${d.position} ${escapeHtml(d.code)} · +${fixed(d.gap)} s</title><polyline points="${l.pos.join(',')} ${l.elbow},${l.y} ${l.x},${l.y}" fill="none" stroke="${d.color}" opacity="${selected ? '.8' : '.35'}"/><circle cx="${l.pos[0]}" cy="${l.pos[1]}" r="${selected ? 8 : 5}" fill="${d.color}" stroke="${selected ? '#fff' : '#111722'}" stroke-width="2"/><rect x="${l.x - 23}" y="${l.y - 8}" width="46" height="17" rx="4" fill="#111722"/><text x="${l.x}" y="${l.y}" dy=".35em" text-anchor="middle" fill="${selected ? '#fff' : d.color}" class="code">${escapeHtml(d.code)}</text></g>`;
+      return `<g data-driver="${escapeHtml(d.id)}" role="button" tabindex="0" aria-label="${escapeHtml(d.code)}, Position ${d.position}, ${fixed(d.gap)} seconds behind" class="marker"><title>P${d.position} ${escapeHtml(d.code)} · +${fixed(d.gap)} s</title><polyline points="${l.pos.join(',')} ${l.elbow},${l.y} ${l.x},${l.y}" fill="none" stroke="${d.color}" opacity="${selected ? '.8' : '.35'}"/><circle cx="${l.pos[0]}" cy="${l.pos[1]}" r="${selected ? 8 : 5}" fill="${d.color}" stroke="${selected ? '#fff' : '#111722'}" stroke-width="2"/><rect x="${l.x - 34}" y="${l.y - 8}" width="68" height="17" rx="4" fill="#111722"/><text x="${l.x}" y="${l.y}" dy=".35em" text-anchor="middle" fill="${selected ? '#fff' : d.color}" class="code ${d.lapped?'lapped':''}">${escapeHtml(d.code)}${d.lapsBehind?' +'+d.lapsBehind+'L':''}</text></g>`;
     }).join('');
     const scale = [0,1,2,3].map(i => {const p=point(i,4,94);return `<text x="${p[0]}" y="${p[1]}" dy=".35em" text-anchor="middle" class="scale">${i?'+'+fixed(m.lap*i/4)+' s':'0 s'}</text>`;}).join('');
-    return `<svg viewBox="0 0 440 440" role="group" aria-label="Time gaps on a circle, leader at twelve o’clock; gaps increase clockwise">${shell}${scale}<path d="${arc(start, end, m.lap)}" fill="none" stroke="#ff453a" stroke-width="22" opacity=".8"/><path d="${arc(m.selected.gap, m.prediction.target, m.lap)}" fill="none" stroke="#ff8a82" stroke-width="2" stroke-dasharray="3 5"/>${markers}<rect x="${ghost[0] - 6}" y="${ghost[1] - 6}" width="12" height="12" fill="#fff" stroke="#ff453a" stroke-width="2" transform="rotate(45 ${ghost[0]} ${ghost[1]})"/><text x="220" y="195" text-anchor="middle" class="center-label">SELECTED</text><text x="220" y="230" text-anchor="middle" class="center-code">${escapeHtml(m.selected.code)}</text><text x="220" y="255" text-anchor="middle" class="center-label">NOW P${m.selected.position} → ~P${m.prediction.rank}</text></svg><p class="circle-caption">Leader at 12 o’clock · larger gaps run clockwise ↻<br>One full circle = ${fixed(m.lap)} s · time gaps, not track positions</p>`;
+    return `<svg viewBox="0 0 440 440" role="group" aria-label="Time gaps on a circle, leader at twelve o’clock; gaps increase clockwise">${shell}${scale}<path d="${arc(start, end, m.lap)}" fill="none" stroke="#ff453a" stroke-width="22" opacity=".8"/><path d="${arc(m.selected.gap, m.prediction.target, m.lap)}" fill="none" stroke="#ff8a82" stroke-width="2" stroke-dasharray="3 5"/>${markers}<rect x="${ghost[0] - 6}" y="${ghost[1] - 6}" width="12" height="12" fill="#fff" stroke="#ff453a" stroke-width="2" transform="rotate(45 ${ghost[0]} ${ghost[1]})"/><text x="220" y="195" text-anchor="middle" class="center-label">SELECTED</text><text x="220" y="230" text-anchor="middle" class="center-code">${escapeHtml(m.selected.code)}</text><text x="220" y="255" text-anchor="middle" class="center-label">NOW P${m.selected.position} → ~P${m.prediction.rank}</text></svg><p class="circle-caption">Leader at 12 o’clock · larger gaps run clockwise ↻<br>One full circle = ${fixed(m.lap)} s · gaps wrap across laps<br>+1L / +2L = reported lap deficit · time gaps, not track positions</p>`;
   }
 }
 
@@ -633,7 +675,7 @@ const STYLES = `
   header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:20px}h2{font-size:22px;letter-spacing:-.5px;margin:5px 0 0;font-weight:700}.eyebrow{font-size:10px;letter-spacing:1.8px;color:#9caec4;font-weight:700}.badge{font-size:9px;font-weight:800;letter-spacing:1px;border:1px solid #43516a;border-radius:20px;padding:7px 10px;color:#adbbcc}.badge.active{color:#ffaba5;border-color:#7a3838;background:#ff453a12}
   .controls{display:grid;grid-template-columns:1.8fr 1fr 1fr;gap:12px}label{font-size:11px;color:#bdcadb;font-weight:600}label>span{color:#8291a7}input,select{display:block;width:100%;margin-top:7px;border:1px solid #354158;border-radius:9px;background:#192232;color:#f2f5f9;padding:10px;font:inherit;font-size:13px;min-width:0;color-scheme:dark}input:focus,select:focus{outline:2px solid #ff756d;outline-offset:2px}select:disabled{opacity:.6}
   .preset{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:14px;padding:12px;border:1px solid #29364c;border-radius:10px;background:#151e2c}.preset strong{font-size:13px;display:block}.preset span{display:block;font-size:10px;color:#9caec4;margin-top:4px}.preset button{font:inherit;font-size:10px;flex-shrink:0;cursor:pointer;color:#dbe5f4;background:#253249;border:1px solid #40516b;border-radius:7px;padding:8px}.preset button:disabled{opacity:.4;cursor:default}.preset button:focus-visible{outline:2px solid #ff756d}.preset-note{font-size:11px;color:#dcb977;line-height:1.5;margin:8px 0 0}
-  .layout{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:22px;align-items:center;margin-top:10px}.visual svg{width:100%;display:block;overflow:visible}.code{font-size:14px;font-weight:750}.center-code{fill:#fff;font-size:40px;font-weight:800;letter-spacing:-1px}.center-label{fill:#9caec4;font-size:10px;letter-spacing:1px}.marker{cursor:pointer}.marker:focus{outline:none}.marker:focus circle{stroke:white;stroke-width:4px}
+  .layout{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:22px;align-items:center;margin-top:10px}.visual svg{width:100%;display:block;overflow:visible}.code{font-size:14px;font-weight:750}.code.lapped{font-size:11px}.center-code{fill:#fff;font-size:40px;font-weight:800;letter-spacing:-1px}.center-label{fill:#9caec4;font-size:10px;letter-spacing:1px}.marker{cursor:pointer}.marker:focus{outline:none}.marker:focus circle{stroke:white;stroke-width:4px}
   .legend{display:flex;justify-content:center;flex-wrap:wrap;gap:13px;font-size:10px;color:#a9b8cc}.legend span{display:flex;align-items:center;gap:5px}.dot{width:7px;height:7px;border-radius:50%;background:#a9b8cc}.window{width:14px;height:5px;background:#ff453a;border-radius:2px}.ghost{width:7px;height:7px;background:white;transform:rotate(45deg)}
   .insights{padding:20px 0}.result{font-size:68px;font-weight:800;line-height:1.1;letter-spacing:-3px;margin:12px 0 19px}.result>span{display:block;font-size:12px;letter-spacing:0;color:#b5c3d5;font-weight:500;margin-top:7px}.neighbors{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid #293449;border-bottom:1px solid #293449;padding:15px 0;gap:10px}.neighbors div{display:flex;flex-direction:column;gap:5px}.neighbors small{font-size:9px;letter-spacing:1.5px;color:#9caec4}.neighbors strong{font-size:19px}.neighbors span{font-size:11px;color:#adbbcd}.notice{font-size:12px;line-height:1.6;color:#a7e3c2}.notice.waiting{border-left:2px solid #e9b65b;padding-left:12px;color:#e7cb9b}.assumption{font-size:11px;line-height:1.6;color:#98a9bf;margin:10px 0 0}
   details{margin-top:16px;border-top:1px solid #293449;padding-top:14px;font-size:12px}summary{cursor:pointer;color:#b7c5d8}.driver-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:12px}.driver-row{display:flex;justify-content:space-between;gap:8px;background:#182131;border:1px solid #29364c;border-left:3px solid var(--team);border-radius:6px;padding:8px;color:#c8d5e6;font-size:11px;cursor:pointer}.driver-row.selected{background:#2d3445;border-color:#8292aa}.driver-row span{white-space:nowrap}.driver-row:focus-visible{outline:2px solid white}
