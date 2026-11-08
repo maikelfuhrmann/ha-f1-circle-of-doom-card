@@ -74,12 +74,15 @@ export function project(drivers, selected, loss, uncertainty) {
   // Equal gaps are deliberately counted ahead: no promise of a safe release at a tie.
   const rank = delta => 1 + others.filter(d => d.gap <= selected.gap + delta + 0.001).length;
   const target = selected.gap + loss;
-  const ahead = others.filter(d => d.gap <= target).at(-1);
-  const behind = others.find(d => d.gap > target);
+  const before = others.filter(d => d.gap <= target + 0.001);
+  const after = others.filter(d => d.gap > target + 0.001);
+  const ahead = before.at(-1), behind = after[0];
+  const order = [...before, { ...selected, gap: target }, ...after]
+    .map((d, i) => ({ ...d, projectedPosition: i + 1, selected: d.id === selected.id }));
   return {
     rank: rank(loss), best: rank(Math.max(0, loss - uncertainty)), worst: rank(loss + uncertainty),
-    target, ahead, behind,
-    aheadGap: ahead ? target - ahead.gap : null,
+    target, ahead, behind, order,
+    aheadGap: ahead ? Math.max(0, target - ahead.gap) : null,
     behindGap: behind ? behind.gap - target : null,
   };
 }
