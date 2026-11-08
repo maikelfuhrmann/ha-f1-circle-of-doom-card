@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { seconds, validateConfig, buildModel, referenceLap } from '../src/model.js';
+import { seconds, validateConfig, buildModel, referenceLap, project } from '../src/model.js';
 
 const now = Date.parse('2026-11-08T18:20:00Z');
 const config = validateConfig({ entity:'sensor.timing', session_entity:'sensor.session', session_status_entity:'sensor.status', track_status_entity:'sensor.track', pit_loss:22, uncertainty:2 });
@@ -70,4 +70,20 @@ test('only an explicit positive lap deficit triggers the lapped guard',()=>{
     const s=data();s['sensor.timing'].attributes.drivers[5].gap_to_leader=value;
     assert.equal(model(s).reason,'gaps',value);
   }
+});
+
+test('observed race gaps put the leader behind six rivals, with no self double-count',()=>{
+  const codes=['ANT','NOR','RUS','HAD','VER','LAW','PIA','HUL','ALB'];
+  const drivers=[0,6.6,9.1,11.2,16.2,17.7,18.5,24.1,27.2].map((gap,i)=>({id:codes[i],gap,position:i+1}));
+  const p=project(drivers,drivers[0],21.83,2);
+  assert.equal(p.rank,7); assert.equal(p.ahead.id,'PIA'); assert.equal(p.behind.id,'HUL');
+  assert.deepEqual(p.order.map(d=>d.id),['NOR','RUS','HAD','VER','LAW','PIA','ANT','HUL','ALB']);
+  assert.equal(p.order.find(d=>d.selected).projectedPosition,p.rank);
+  assert.ok(Math.abs(p.aheadGap-3.33)<1e-8); assert.ok(Math.abs(p.behindGap-2.27)<1e-8);
+});
+test('millisecond ties use the same conservative order in rank and neighbors',()=>{
+  const drivers=[{id:'A',gap:0},{id:'B',gap:22.0005},{id:'C',gap:24}];
+  const p=project(drivers,drivers[0],22,2);
+  assert.equal(p.rank,2);assert.equal(p.ahead.id,'B');assert.equal(p.behind.id,'C');
+  assert.equal(p.aheadGap,0);assert.deepEqual(p.order.map(d=>d.id),['B','A','C']);
 });
