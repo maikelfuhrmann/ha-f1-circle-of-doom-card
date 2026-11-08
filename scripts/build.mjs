@@ -1,6 +1,7 @@
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
-const model = (await readFile('src/model.js', 'utf8')).replace(/^export /gm, '');
-const card = (await readFile('src/card.js', 'utf8')).replace(/^import .*from '\.\/model\.js';\n/m, '');
+const { version } = JSON.parse(await readFile('package.json', 'utf8'));
+const parts = await Promise.all(['presets', 'model', 'card'].map(async name =>
+  (await readFile(`src/${name}.js`, 'utf8')).replace(/^import .*from '.+?';\n/gm, '').replace(/^export /gm, '')));
 await mkdir('dist', { recursive: true });
-await writeFile('dist/f1-circle-of-doom-card.js', `/* F1 Circle of Doom Card v0.1.0 | MIT | maikelfuhrmann */\n${model}\n${card}`);
+await writeFile('dist/f1-circle-of-doom-card.js', `/* F1 Circle of Doom Card v${version} | MIT | maikelfuhrmann */\n${parts.join('\n')}`);
 console.log('Built dist/f1-circle-of-doom-card.js');
