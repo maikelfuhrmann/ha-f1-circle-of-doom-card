@@ -6,7 +6,7 @@
 
 A timing-based **pit-stop rejoin estimate** for Home Assistant and [F1 Sensor](https://github.com/Nicxe/f1_sensor). Public timing is enough — no F1TV subscription, account token, GPS feed or external JavaScript library required.
 
-**v0.2.1 · Experimental.** This is a gap-based estimate, not a professional strategy system or a live track map. The interface is English.
+**v0.2.2 · Experimental.** This is a gap-based estimate, not a professional strategy system or a live track map. The interface is English.
 
 ![Circle of Doom with synthetic demo data](docs/preview.jpg)
 
@@ -27,7 +27,7 @@ A timing-based **pit-stop rejoin estimate** for Home Assistant and [F1 Sensor](h
 
 1. Install F1 Sensor (developed against **v6.2.0**) and enable live data plus **Driver positions**, **Current session**, **Session status** and **Track status** in its configuration. The modular F1 Sensor card can work even when these separate entities are disabled: this card specifically needs the entities.
 2. Download [dist/f1-circle-of-doom-card.js](dist/f1-circle-of-doom-card.js) and copy it to `/config/www/f1-circle-of-doom-card.js` (some systems display this directory as `/homeassistant/www`).
-3. Add a dashboard resource: URL `/local/f1-circle-of-doom-card.js?v=0.2.1`, type **JavaScript module**. Reload your dashboard.
+3. Add a dashboard resource: URL `/local/f1-circle-of-doom-card.js?v=0.2.2`, type **JavaScript module**. Reload your dashboard.
 4. Add a manual card using the configuration below. Replace the entity IDs with the actual IDs in your installation; older installations may use names such as `sensor.f1_drivers_driver_positions`.
 
 ### HACS / Marketplace custom repository
@@ -76,7 +76,7 @@ Assumptions: all other drivers stay on track and keep their current relative pac
 - Any active driver in the pits, exiting the pits or stopped. This intentionally suppresses estimates during changing pit-cycle order.
 - Explicit lap deficits or an estimated window reaching the end of the reference lap. This first version does not resolve lapped traffic.
 
-Freshness uses the timing entity's `last_reported` when present, otherwise `last_updated`. This checks the entity timestamp, not each individual upstream field. F1 Sensor may retain some values; the underlying feed is not guaranteed complete. A future race is needed to validate actual live behaviour; current tests cover synthetic scenarios and the real between-session state.
+Freshness uses the timing entity's `last_reported` when present, otherwise `last_updated`. This checks the entity timestamp, not each individual upstream field. F1 Sensor may retain some values; the underlying feed is not guaranteed complete. The leader’s `Lap N` counter is treated as race progress, not a lap deficit. Only explicit deficits such as `+1 LAP` pause the projection for lapped traffic; unknown gap text still pauses as missing data. Regression tests cover the live-feed label format alongside synthetic strategy scenarios.
 
 ## Development
 
