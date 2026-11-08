@@ -1,4 +1,4 @@
-/* F1 Circle of Doom Card v0.3.0 | MIT | maikelfuhrmann */
+/* F1 Circle of Doom Card v0.3.1 | MIT | maikelfuhrmann */
 /** Green defaults: Formula1.com race previews. VSC: heuristic 65% of green,
  * rounded to 0.1s; not measured VSC data. See docs/presets.md. */
 const CIRCUITS = [
@@ -477,26 +477,24 @@ function buildModel(states, config, selectedId, now = Date.now(), overrides = {}
     recovered: drivers.filter(d => d.gapSource === 'intervals').length };
 }
 
-// Labels are spread independently of the timing markers. Markers never move off
-// their true time-gap angle, even when several cars have nearly identical gaps.
+// Timing markers stay at the exact gap angle; compact labels sit just above them.
 function circlePoint(seconds, lap, radius = 125) {
   const angle = ((seconds % lap) + lap) % lap / lap * Math.PI * 2 - Math.PI / 2;
   return [220 + radius * Math.cos(angle), 220 + radius * Math.sin(angle)];
 }
 
-function circleLabels(drivers, lap) {
-  const items = drivers.map(d => {
-    const pos = circlePoint(d.gap, lap);
-    return { id: d.id, pos, side: pos[0] < 220 ? 'left' : 'right', y: pos[1] };
-  });
-  for (const side of ['left', 'right']) {
-    const rows = items.filter(d => d.side === side).sort((a, b) => a.y - b.y);
-    const spacing = Math.min(17, 350 / Math.max(1, rows.length - 1));
-    let previous = 45 - spacing;
-    for (const row of rows) { row.y = Math.max(45, row.y, previous + spacing); previous = row.y; }
-    let next = 395 + spacing;
-    for (const row of rows.toReversed()) { row.y = Math.min(row.y, next - spacing); next = row.y; }
-    for (const row of rows) { row.y = Math.max(45, Math.min(395, row.y)); row.x = side === 'left' ? 51 : 389; row.elbow = side === 'left' ? 76 : 364; }
+function circleLabels(drivers, lap, selectedId) {
+  const placed=[];
+  const items=drivers.map(d=>({id:d.id,pos:circlePoint(d.gap,lap),position:d.position||999}));
+  const priority=[...items].sort((a,b)=>(b.id===selectedId)-(a.id===selectedId)||a.position-b.position||String(a.id).localeCompare(String(b.id)));
+  for(const item of priority){
+    item.x=item.pos[0];item.y=item.pos[1]-14;item.hidden=true;
+    for(let lane=0;lane<3;lane++){
+      const y=item.pos[1]-14-lane*14;
+      if(!placed.some(other=>Math.abs(other.x-item.x)<34&&Math.abs(other.y-y)<13)){
+        item.y=y;item.hidden=false;placed.push(item);break;
+      }
+    }
   }
   return items;
 }
@@ -659,13 +657,13 @@ class F1CircleOfDoomCard extends HTMLElement {
     if (!m.ready) return `<svg viewBox="0 0 440 440" role="img" aria-label="Circle of Doom waiting for reliable race data">${shell}<text x="220" y="215" text-anchor="middle" class="center-code">—</text><text x="220" y="246" text-anchor="middle" class="center-label">WAITING FOR DATA</text></svg>`;
     const start = m.selected.gap + c.pit_loss - c.uncertainty, end = m.selected.gap + c.pit_loss + c.uncertainty;
     const ghost = point(m.prediction.target, m.lap);
-    const labels = new Map(circleLabels(m.drivers, m.lap).map(l => [l.id, l]));
+    const labels = new Map(circleLabels(m.drivers, m.lap, m.selected.id).map(l => [l.id, l]));
     const markers = m.drivers.map(d => {
       const l = labels.get(d.id), selected = d.id === m.selected.id;
-      return `<g data-driver="${escapeHtml(d.id)}" role="button" tabindex="0" aria-label="${escapeHtml(d.code)}, Position ${d.position}, ${fixed(d.gap)} seconds behind" class="marker"><title>P${d.position} ${escapeHtml(d.code)} · +${fixed(d.gap)} s</title><polyline points="${l.pos.join(',')} ${l.elbow},${l.y} ${l.x},${l.y}" fill="none" stroke="${d.color}" opacity="${selected ? '.8' : '.35'}"/><circle cx="${l.pos[0]}" cy="${l.pos[1]}" r="${selected ? 8 : 5}" fill="${d.color}" stroke="${selected ? '#fff' : '#111722'}" stroke-width="2"/><rect x="${l.x - 34}" y="${l.y - 8}" width="68" height="17" rx="4" fill="#111722"/><text x="${l.x}" y="${l.y}" dy=".35em" text-anchor="middle" fill="${selected ? '#fff' : d.color}" class="code ${d.lapped?'lapped':''}">${escapeHtml(d.code)}${d.lapsBehind?' +'+d.lapsBehind+'L':''}</text></g>`;
+      return `<g data-driver="${escapeHtml(d.id)}" role="button" tabindex="0" aria-label="${escapeHtml(d.code)}, Position ${d.position}, ${fixed(d.gap)} seconds behind" class="marker"><title>P${d.position} ${escapeHtml(d.code)} · +${fixed(d.gap)} s</title><circle cx="${l.pos[0]}" cy="${l.pos[1]}" r="${selected ? 8 : 5}" fill="${d.color}" stroke="${selected ? '#fff' : '#111722'}" stroke-width="2"/><g class="marker-label ${l.hidden?'crowded':''}"><rect x="${l.x - 17}" y="${l.y - 7}" width="34" height="13" rx="3" fill="#111722" opacity=".92"/><text x="${l.x}" y="${l.y}" dy=".35em" text-anchor="middle" fill="${selected ? '#fff' : d.color}" class="code">${escapeHtml(d.code)}</text></g>${d.lapsBehind?`<text x="${l.pos[0]}" y="${l.pos[1]+15}" text-anchor="middle" class="lap-tag" fill="${d.color}">+${d.lapsBehind}L</text>`:''}</g>`;
     }).join('');
     const scale = [0,1,2,3].map(i => {const p=point(i,4,94);return `<text x="${p[0]}" y="${p[1]}" dy=".35em" text-anchor="middle" class="scale">${i?'+'+fixed(m.lap*i/4)+' s':'0 s'}</text>`;}).join('');
-    return `<svg viewBox="0 0 440 440" role="group" aria-label="Time gaps on a circle, leader at twelve o’clock; gaps increase clockwise">${shell}${scale}<path d="${arc(start, end, m.lap)}" fill="none" stroke="#ff453a" stroke-width="22" opacity=".8"/><path d="${arc(m.selected.gap, m.prediction.target, m.lap)}" fill="none" stroke="#ff8a82" stroke-width="2" stroke-dasharray="3 5"/>${markers}<rect x="${ghost[0] - 6}" y="${ghost[1] - 6}" width="12" height="12" fill="#fff" stroke="#ff453a" stroke-width="2" transform="rotate(45 ${ghost[0]} ${ghost[1]})"/><text x="220" y="195" text-anchor="middle" class="center-label">SELECTED</text><text x="220" y="230" text-anchor="middle" class="center-code">${escapeHtml(m.selected.code)}</text><text x="220" y="255" text-anchor="middle" class="center-label">NOW P${m.selected.position} → ~P${m.prediction.rank}</text></svg><p class="circle-caption">Leader at 12 o’clock · larger gaps run clockwise ↻<br>One full circle = ${fixed(m.lap)} s · gaps wrap across laps<br>+1L / +2L = reported lap deficit · time gaps, not track positions</p>`;
+    return `<svg viewBox="0 0 440 440" role="group" aria-label="Time gaps on a circle, leader at twelve o’clock; gaps increase clockwise">${shell}${scale}<path d="${arc(start, end, m.lap)}" fill="none" stroke="#ff453a" stroke-width="22" opacity=".8"/><path d="${arc(m.selected.gap, m.prediction.target, m.lap)}" fill="none" stroke="#ff8a82" stroke-width="2" stroke-dasharray="3 5"/>${markers}<rect x="${ghost[0] - 6}" y="${ghost[1] - 6}" width="12" height="12" fill="#fff" stroke="#ff453a" stroke-width="2" transform="rotate(45 ${ghost[0]} ${ghost[1]})"/><text x="220" y="195" text-anchor="middle" class="center-label">SELECTED</text><text x="220" y="230" text-anchor="middle" class="center-code">${escapeHtml(m.selected.code)}</text><text x="220" y="255" text-anchor="middle" class="center-label">NOW P${m.selected.position} → ~P${m.prediction.rank}</text></svg><p class="circle-caption">Leader at 12 o’clock · larger gaps run clockwise ↻<br>One full circle = ${fixed(m.lap)} s · gaps wrap across laps<br>+1L / +2L = reported lap deficit · time gaps, not track positions${[...labels.values()].some(l=>l.hidden)?'<br>Tap a marker or choose a driver to reveal crowded labels':''}</p>`;
   }
 }
 
@@ -675,7 +673,7 @@ const STYLES = `
   header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:20px}h2{font-size:22px;letter-spacing:-.5px;margin:5px 0 0;font-weight:700}.eyebrow{font-size:10px;letter-spacing:1.8px;color:#9caec4;font-weight:700}.badge{font-size:9px;font-weight:800;letter-spacing:1px;border:1px solid #43516a;border-radius:20px;padding:7px 10px;color:#adbbcc}.badge.active{color:#ffaba5;border-color:#7a3838;background:#ff453a12}
   .controls{display:grid;grid-template-columns:1.8fr 1fr 1fr;gap:12px}label{font-size:11px;color:#bdcadb;font-weight:600}label>span{color:#8291a7}input,select{display:block;width:100%;margin-top:7px;border:1px solid #354158;border-radius:9px;background:#192232;color:#f2f5f9;padding:10px;font:inherit;font-size:13px;min-width:0;color-scheme:dark}input:focus,select:focus{outline:2px solid #ff756d;outline-offset:2px}select:disabled{opacity:.6}
   .preset{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:14px;padding:12px;border:1px solid #29364c;border-radius:10px;background:#151e2c}.preset strong{font-size:13px;display:block}.preset span{display:block;font-size:10px;color:#9caec4;margin-top:4px}.preset button{font:inherit;font-size:10px;flex-shrink:0;cursor:pointer;color:#dbe5f4;background:#253249;border:1px solid #40516b;border-radius:7px;padding:8px}.preset button:disabled{opacity:.4;cursor:default}.preset button:focus-visible{outline:2px solid #ff756d}.preset-note{font-size:11px;color:#dcb977;line-height:1.5;margin:8px 0 0}
-  .layout{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:22px;align-items:center;margin-top:10px}.visual svg{width:100%;display:block;overflow:visible}.code{font-size:14px;font-weight:750}.code.lapped{font-size:11px}.center-code{fill:#fff;font-size:40px;font-weight:800;letter-spacing:-1px}.center-label{fill:#9caec4;font-size:10px;letter-spacing:1px}.marker{cursor:pointer}.marker:focus{outline:none}.marker:focus circle{stroke:white;stroke-width:4px}
+  .layout{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:22px;align-items:center;margin-top:10px}.visual svg{width:100%;display:block;overflow:visible}.code{font-size:10px;font-weight:750}.lap-tag{font-size:8px;paint-order:stroke;stroke:#111722;stroke-width:3px}.marker-label.crowded{opacity:0}.marker:hover .marker-label,.marker:focus .marker-label{opacity:1}.center-code{fill:#fff;font-size:40px;font-weight:800;letter-spacing:-1px}.center-label{fill:#9caec4;font-size:10px;letter-spacing:1px}.marker{cursor:pointer}.marker:focus{outline:none}.marker:focus circle{stroke:white;stroke-width:4px}
   .legend{display:flex;justify-content:center;flex-wrap:wrap;gap:13px;font-size:10px;color:#a9b8cc}.legend span{display:flex;align-items:center;gap:5px}.dot{width:7px;height:7px;border-radius:50%;background:#a9b8cc}.window{width:14px;height:5px;background:#ff453a;border-radius:2px}.ghost{width:7px;height:7px;background:white;transform:rotate(45deg)}
   .insights{padding:20px 0}.result{font-size:68px;font-weight:800;line-height:1.1;letter-spacing:-3px;margin:12px 0 19px}.result>span{display:block;font-size:12px;letter-spacing:0;color:#b5c3d5;font-weight:500;margin-top:7px}.neighbors{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid #293449;border-bottom:1px solid #293449;padding:15px 0;gap:10px}.neighbors div{display:flex;flex-direction:column;gap:5px}.neighbors small{font-size:9px;letter-spacing:1.5px;color:#9caec4}.neighbors strong{font-size:19px}.neighbors span{font-size:11px;color:#adbbcd}.notice{font-size:12px;line-height:1.6;color:#a7e3c2}.notice.waiting{border-left:2px solid #e9b65b;padding-left:12px;color:#e7cb9b}.assumption{font-size:11px;line-height:1.6;color:#98a9bf;margin:10px 0 0}
   details{margin-top:16px;border-top:1px solid #293449;padding-top:14px;font-size:12px}summary{cursor:pointer;color:#b7c5d8}.driver-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:12px}.driver-row{display:flex;justify-content:space-between;gap:8px;background:#182131;border:1px solid #29364c;border-left:3px solid var(--team);border-radius:6px;padding:8px;color:#c8d5e6;font-size:11px;cursor:pointer}.driver-row.selected{background:#2d3445;border-color:#8292aa}.driver-row span{white-space:nowrap}.driver-row:focus-visible{outline:2px solid white}
