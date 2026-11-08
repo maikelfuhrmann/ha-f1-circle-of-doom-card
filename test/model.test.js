@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { seconds, validateConfig, buildModel, referenceLap, project } from '../src/model.js';
+import { seconds, validateConfig, buildModel, referenceLap, project, lapDeficit, trafficNeighbors } from '../src/model.js';
 
 const now = Date.parse('2026-11-08T18:20:00Z');
 const config = validateConfig({ entity:'sensor.timing', session_entity:'sensor.session', session_status_entity:'sensor.status', track_status_entity:'sensor.track', pit_loss:22, uncertainty:2 });
@@ -29,12 +29,12 @@ test('stale data and future clocks suppress prediction; old stable status is val
   s['sensor.timing'].last_updated=new Date(now+20000).toISOString();assert.equal(model(s).reason,'stale');
 });
 test('missing gap never becomes zero',()=>{const s=data();s['sensor.timing'].attributes.drivers[2].gap_to_leader=null;assert.equal(model(s).reason,'gaps');});
-test('lap deficits are not converted to seconds',()=>{const s=data();s['sensor.timing'].attributes.drivers[5].gap_to_leader='+1 LAP';assert.equal(model(s).reason,'lapped');});
+test('lap deficits are not converted to seconds',()=>{const s=data();s['sensor.timing'].attributes.drivers[5].gap_to_leader='+1 LAP';assert.equal(model(s).reason,'gaps');});
 test('inconsistent timing and duplicate identity are rejected',()=>{const s=data();s['sensor.timing'].attributes.drivers[2].gap_to_leader='+1';assert.equal(model(s).reason,'order');s['sensor.timing'].attributes.drivers[2].racing_number='1';assert.equal(model(s).reason,'order');});
 test('pit activity pauses changing order',()=>{const s=data();s['sensor.timing'].attributes.drivers[3].in_pit=true;assert.equal(model(s).reason,'pit');});
 test('missing sensors and empty fields have explicit waiting states',()=>{assert.equal(model({}).reason,'configuration');const s=data();s['sensor.timing'].attributes.drivers=[];assert.equal(model(s).reason,'empty');});
 test('requires two recent laps and ignores unavailable times',()=>{assert.equal(referenceLap({laps:{1:'1:12.000'}}),null);assert.equal(referenceLap({laps:{1:'1:12',2:'1:14',3:null}}),73);});
-test('crossing reference lap boundary blocks misleading rejoin estimate',()=>{const s=data();assert.equal(model(s,'6',{...config,pit_loss:40}).reason,'lap_boundary');});
+test('crossing a reference lap boundary preserves race position',()=>{const m=model(data(),'6',{...config,pit_loss:40});assert.equal(m.ready,true);assert.equal(m.prediction.rank,6);assert.equal(m.prediction.target,72);});
 test('config rejects bad numbers and non-sensor entities',()=>{for(const c of [{pit_loss:NaN},{pit_loss:-2},{uncertainty:22},{stale_after:0},{entity:'light.test'},{reference_lap_seconds:'70'}]) assert.throws(()=>validateConfig({...config,...c}));});
 test('unavailable entity cannot retain a seemingly live projection',()=>{const s=data();s['sensor.timing'].state='unavailable';assert.equal(model(s).ready,false);});
 
@@ -61,10 +61,10 @@ test('leader lap counter is not a lap deficit and cannot pause the field',()=>{
     const m=model(s);assert.equal(m.ready,true,value);assert.equal(m.selected.gap,0);assert.equal(m.prediction.rank,4);
   }
 });
-test('only an explicit positive lap deficit triggers the lapped guard',()=>{
-  for(const value of ['+1 LAP','1 Lap','+2 LAPS','2 Runden']){
+test('lap deficit labels alone never fabricate timing',()=>{
+  for(const value of ['+1 LAP','1 Lap','+2 LAPS','2 Runden','1 L','+2L']){
     const s=data();s['sensor.timing'].attributes.drivers[5].gap_to_leader=value;
-    assert.equal(model(s).reason,'lapped',value);
+    assert.equal(model(s).reason,'gaps',value);assert.ok(lapDeficit(value)>0);
   }
   for(const value of ['Lap 12','no lap data','0 LAPS']){
     const s=data();s['sensor.timing'].attributes.drivers[5].gap_to_leader=value;
@@ -86,4 +86,48 @@ test('millisecond ties use the same conservative order in rank and neighbors',()
   const p=project(drivers,drivers[0],22,2);
   assert.equal(p.rank,2);assert.equal(p.ahead.id,'B');assert.equal(p.behind.id,'C');
   assert.equal(p.aheadGap,0);assert.deepEqual(p.order.map(d=>d.id),['B','A','C']);
+});
+
+function lappedData(){
+ const s=data();
+ s['sensor.timing'].attributes.drivers=[0,17,65.951,'1 L','1 L','2 L'].map((gap,i)=>({racing_number:String(i+1),tla:`D${i+1}`,current_position:i+1,gap_to_leader:gap,interval_to_position_ahead:[null,17,48.951,20.508,12,78][i],laps:{32:'1:18',33:'1:18',34:'1:18'}}));
+ return s;
+}
+test('one and two laps down resolve through numeric intervals without inventing lap seconds',()=>{
+ const m=model(lappedData());assert.equal(m.ready,true);assert.equal(m.recovered,3);
+ const gaps=m.drivers.map(d=>d.gap);assert.ok(Math.abs(gaps[3]-86.459)<1e-8);assert.ok(Math.abs(gaps[5]-176.459)<1e-8);
+ assert.equal(m.drivers[5].lapsBehind,2);assert.equal(m.prediction.rank,2);
+ // Race order puts D3 behind, but lapped D5 is just ahead on the wrapped circle.
+ assert.equal(m.prediction.behind.id,'3');assert.equal(m.traffic.ahead.id,'5');
+ assert.ok(Math.abs(m.traffic.aheadGap-1.541)<1e-8);
+});
+test('selected lapped driver is ranked on total gap, not its modulo angle',()=>{
+ const m=model(lappedData(),'4');assert.equal(m.ready,true);assert.equal(m.prediction.rank,5);
+ assert.ok(Math.abs(m.prediction.target-108.459)<1e-8);assert.equal(m.prediction.ahead.id,'5');
+});
+test('reference lap changes traffic scale but cannot change recovered gaps or race order',()=>{
+ const a=model(lappedData()),b=model(lappedData(),'1',{...config,reference_lap_seconds:65});
+ assert.deepEqual(a.drivers.map(d=>d.gap),b.drivers.map(d=>d.gap));assert.equal(a.prediction.rank,b.prediction.rank);
+});
+test('incomplete interval chains stop safely, even when later intervals are numeric',()=>{
+ const s=lappedData();s['sensor.timing'].attributes.drivers[3].interval_to_position_ahead='1 L';
+ const m=model(s);assert.equal(m.reason,'gaps');assert.equal(m.drivers[4].gap,null);
+});
+test('a valid direct gap remains authoritative over asynchronous intervals',()=>{
+ const s=lappedData();s['sensor.timing'].attributes.drivers[2].interval_to_position_ahead=1;
+ assert.equal(model(s).drivers[2].gap,65.951);
+});
+test('missing intermediate classified driver cannot be silently skipped by interval recovery',()=>{
+ const s=lappedData();s['sensor.timing'].attributes.drivers.splice(2,1);
+ assert.equal(model(s).reason,'order');
+});
+test('lapped VSC estimate uses active loss and still respects freshness',()=>{
+ const s=lappedData();s['sensor.track'].state='VSC';const m=model(s,'4');
+ assert.equal(m.ready,true);assert.equal(m.settings.mode,'vsc');assert.ok(Math.abs(m.prediction.target-(86.459+m.settings.loss))<1e-8);
+ s['sensor.timing'].last_updated=new Date(now-91000).toISOString();assert.equal(model(s).reason,'stale');
+});
+test('circular traffic wraps ahead and behind across twelve oclock',()=>{
+ const ds=[{id:'A',gap:0,position:1},{id:'B',gap:77,position:2},{id:'C',gap:83,position:3}];
+ const p=trafficNeighbors(ds,ds[0],1,80);assert.equal(p.ahead.id,'B');assert.equal(p.aheadGap,4);assert.equal(p.behind.id,'C');assert.equal(p.behindGap,2);
+ const tie=trafficNeighbors(ds,ds[0],3,80);assert.equal(tie.aheadGap,0);assert.equal(tie.behindGap,0);
 });

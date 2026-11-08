@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { circlePoint, circleLabels } from '../src/layout.js';
+import { circlePoint, circleLabels, circleArc } from '../src/layout.js';
 
 test('time scale places the leader at twelve and larger gaps clockwise',()=>{
   assert.deepEqual(circlePoint(0,80),[220,95]);
@@ -16,3 +16,14 @@ for(const gaps of [Array.from({length:22},(_,i)=>10+i*.01),Array.from({length:22
     for(const side of ['left','right']){const ys=labels.filter(l=>l.side===side).map(l=>l.y).sort((a,b)=>a-b);for(let i=1;i<ys.length;i++)assert.ok(ys[i]-ys[i-1]>=16);}
   });
 }
+
+test('multiple lap offsets wrap to exactly the same circle point',()=>{
+ assert.deepEqual(circlePoint(5,80),circlePoint(165,80));
+ assert.deepEqual(circlePoint(0,80),circlePoint(160,80));
+});
+test('arcs split complete revolutions and retain crossings over twelve oclock',()=>{
+ const crossing=circleArc(77,83,80);assert.ok(crossing.startsWith('M '+circlePoint(77,80).join(' ')));assert.ok(crossing.endsWith(circlePoint(83,80).join(' ')));
+ assert.equal((circleArc(0,80,80).match(/ A /g)||[]).length,2);
+ assert.equal((circleArc(10,210,80).match(/ A /g)||[]).length,2);
+ assert.ok(!circleArc(0,80,80).includes('NaN'));
+});
