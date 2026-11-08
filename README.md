@@ -6,7 +6,7 @@
 
 A timing-based **pit-stop rejoin estimate** for Home Assistant and [F1 Sensor](https://github.com/Nicxe/f1_sensor). Public timing is enough — no F1TV subscription, account token, GPS feed or external JavaScript library required.
 
-**v0.2.2 · Experimental.** This is a gap-based estimate, not a professional strategy system or a live track map. The interface is English.
+**v0.2.3 · Experimental.** This is a gap-based estimate, not a professional strategy system or a live track map. The interface is English.
 
 ![Circle of Doom with synthetic demo data](docs/preview.jpg)
 
@@ -16,7 +16,8 @@ A timing-based **pit-stop rejoin estimate** for Home Assistant and [F1 Sensor](h
 - Automatic circuit-specific pit-loss defaults for 25 circuits, with editable per-circuit values.
 - Automatic VSC mode, shown only while VSC is active, with a separate editable loss.
 - ± uncertainty window and a reset button for the active default.
-- Estimated rejoin position, position range, and the cars immediately ahead and behind.
+- Estimated rejoin position and range, the gap + pit-loss calculation, and a preview of the reordered field.
+- Collision-free label columns connected to exact timing markers, with a seconds scale and explicit clockwise gap direction.
 - Responsive layout, keyboard-accessible controls and explicit waiting states.
 - No invented positions: projection pauses when required data is missing or unreliable.
 - MIT licensed. No trackers, telemetry, requests to third parties or HA service calls.
@@ -27,7 +28,7 @@ A timing-based **pit-stop rejoin estimate** for Home Assistant and [F1 Sensor](h
 
 1. Install F1 Sensor (developed against **v6.2.0**) and enable live data plus **Driver positions**, **Current session**, **Session status** and **Track status** in its configuration. The modular F1 Sensor card can work even when these separate entities are disabled: this card specifically needs the entities.
 2. Download [dist/f1-circle-of-doom-card.js](dist/f1-circle-of-doom-card.js) and copy it to `/config/www/f1-circle-of-doom-card.js` (some systems display this directory as `/homeassistant/www`).
-3. Add a dashboard resource: URL `/local/f1-circle-of-doom-card.js?v=0.2.2`, type **JavaScript module**. Reload your dashboard.
+3. Add a dashboard resource: URL `/local/f1-circle-of-doom-card.js?v=0.2.3`, type **JavaScript module**. Reload your dashboard.
 4. Add a manual card using the configuration below. Replace the entity IDs with the actual IDs in your installation; older installations may use names such as `sensor.f1_drivers_driver_positions`.
 
 ### HACS / Marketplace custom repository
