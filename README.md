@@ -6,7 +6,7 @@
 
 A timing-based **pit-stop rejoin estimate** for Home Assistant and [F1 Sensor](https://github.com/Nicxe/f1_sensor). Public timing is enough — no F1TV subscription, account token, GPS feed or external JavaScript library required.
 
-**v0.2.3 · Experimental.** This is a gap-based estimate, not a professional strategy system or a live track map. The interface is English.
+**v0.3.0 · Experimental.** This is a gap-based estimate, not a professional strategy system or a live track map. The interface is English.
 
 ![Circle of Doom with synthetic demo data](docs/preview.jpg)
 
@@ -17,6 +17,8 @@ A timing-based **pit-stop rejoin estimate** for Home Assistant and [F1 Sensor](h
 - Automatic VSC mode, shown only while VSC is active, with a separate editable loss.
 - ± uncertainty window and a reset button for the active default.
 - Estimated rejoin position and range, the gap + pit-loss calculation, and a preview of the reordered field.
+- Lapped-car support using numeric intervals, including multiple laps and windows crossing the circle boundary.
+- Separate estimated race order and nearest traffic on the wrapped time-gap circle.
 - Collision-free label columns connected to exact timing markers, with a seconds scale and explicit clockwise gap direction.
 - Responsive layout, keyboard-accessible controls and explicit waiting states.
 - No invented positions: projection pauses when required data is missing or unreliable.
@@ -28,7 +30,7 @@ A timing-based **pit-stop rejoin estimate** for Home Assistant and [F1 Sensor](h
 
 1. Install F1 Sensor (developed against **v6.2.0**) and enable live data plus **Driver positions**, **Current session**, **Session status** and **Track status** in its configuration. The modular F1 Sensor card can work even when these separate entities are disabled: this card specifically needs the entities.
 2. Download [dist/f1-circle-of-doom-card.js](dist/f1-circle-of-doom-card.js) and copy it to `/config/www/f1-circle-of-doom-card.js` (some systems display this directory as `/homeassistant/www`).
-3. Add a dashboard resource: URL `/local/f1-circle-of-doom-card.js?v=0.2.3`, type **JavaScript module**. Reload your dashboard.
+3. Add a dashboard resource: URL `/local/f1-circle-of-doom-card.js?v=0.3.0`, type **JavaScript module**. Reload your dashboard.
 4. Add a manual card using the configuration below. Replace the entity IDs with the actual IDs in your installation; older installations may use names such as `sensor.f1_drivers_driver_positions`.
 
 ### HACS / Marketplace custom repository
@@ -51,7 +53,7 @@ uncertainty: 2
 stale_after: 90
 ```
 
-All four entity settings are required. `driver: "4"` optionally sets the initial racing number. `reference_lap_seconds: 72` optionally overrides the reference lap; otherwise the card uses the median of the leader's last three recorded laps, requiring at least two valid samples. The override only affects the circle scale and lap-boundary guard.
+All four entity settings are required. `driver: "4"` optionally sets the initial racing number. `reference_lap_seconds: 72` optionally overrides the reference lap; otherwise the card uses the median of the leader's last three recorded laps, requiring at least two valid samples. The override affects the circle scale and estimated circular traffic, never the recovered total gaps or projected race rank.
 
 The card detects the circuit from the current-session or session-status attributes. Green defaults use published F1 race-preview estimates; see the [complete table and sources](docs/presets.md). **VSC defaults are approximate: 65% of each green baseline, not measured VSC data.** Adjust both to match conditions. Only the active mode's input is shown: **Pit loss** normally, **VSC pit loss** while track status is VSC. Returning to CLEAR restores the green value automatically.
 
@@ -62,6 +64,10 @@ Unknown circuits use the clearly labelled `pit_loss` / `vsc_pit_loss` fallback (
 ## Reading the circle
 
 The leader is fixed at twelve o'clock. Increasing time gaps run clockwise; one full circle represents the reference lap. Markers show **relative time gaps**, not physical track coordinates or interpolated movement.
+
+Lapped vehicles retain their complete time deficit for race classification. When the feed replaces seconds with `1 L`, `+1 LAP` or `2 LAPS`, the card recovers the deficit from the preceding classified driver's known gap plus the numeric `interval_to_position_ahead`, chaining only consecutive positions. It never multiplies a lap label by a reference lap to invent a gap. Recovered values are identified in the details.
+
+The circle wraps each total gap around the reference lap. `+1L` / `+2L` beside a driver is the feed's reported lap deficit. **Ahead/behind on circle** estimates nearby traffic after the stop, including cars on different laps; **race order** uses the full gaps. Circular spacing is an approximation based on a common reference lap, not actual GPS spacing. Changes in pace, old individual fields and mixed timing updates limit its accuracy.
 
 The selected driver's gap plus the chosen pit loss is the estimated rejoin gap. The red arc is the ± uncertainty window; the white diamond is its centre. The position range is a scenario range, not a statistical confidence interval. Competitors tied at a boundary are conservatively counted ahead.
 
@@ -75,9 +81,9 @@ Assumptions: all other drivers stay on track and keep their current relative pac
 - Unavailable sensors, missing timestamps, data older than `stale_after` seconds, or clocks more than ten seconds in the future.
 - Missing gaps, inconsistent order, duplicate drivers, fewer than two active drivers, or insufficient reference lap samples.
 - Any active driver in the pits, exiting the pits or stopped. This intentionally suppresses estimates during changing pit-cycle order.
-- Explicit lap deficits or an estimated window reaching the end of the reference lap. This first version does not resolve lapped traffic.
+- A missing numeric gap that cannot be recovered through an uninterrupted numeric interval chain. A lap label alone does not provide precise timing.
 
-Freshness uses the timing entity's `last_reported` when present, otherwise `last_updated`. This checks the entity timestamp, not each individual upstream field. F1 Sensor may retain some values; the underlying feed is not guaranteed complete. The leader’s `Lap N` counter is treated as race progress, not a lap deficit. Only explicit deficits such as `+1 LAP` pause the projection for lapped traffic; unknown gap text still pauses as missing data. Regression tests cover the live-feed label format alongside synthetic strategy scenarios.
+Freshness uses the timing entity's `last_reported` when present, otherwise `last_updated`. This checks the entity timestamp, not each individual upstream field. F1 Sensor may retain some values; the underlying feed is not guaranteed complete. The leader’s `Lap N` counter is treated as race progress, not a lap deficit. Explicit deficits such as `1 L` and `+1 LAP` identify lapped cars; unresolved gaps still pause the prediction. Regression tests cover the live-feed label format alongside synthetic strategy scenarios.
 
 ## Development
 
