@@ -27,7 +27,7 @@ A timing-based **pit-stop rejoin estimate** for Home Assistant and [F1 Sensor](h
 
 1. Install F1 Sensor (developed against **v6.2.0**) and enable live data plus **Driver positions**, **Current session**, **Session status** and **Track status** in its configuration. The modular F1 Sensor card can work even when these separate entities are disabled: this card specifically needs the entities.
 2. Download [dist/f1-circle-of-doom-card.js](dist/f1-circle-of-doom-card.js) and copy it to `/config/www/f1-circle-of-doom-card.js` (some systems display this directory as `/homeassistant/www`).
-3. Add a dashboard resource: URL `/local/f1-circle-of-doom-card.js?v=0.1.0`, type **JavaScript module**. Reload your dashboard.
+3. Add a dashboard resource: URL `/local/f1-circle-of-doom-card.js?v=0.2.1`, type **JavaScript module**. Reload your dashboard.
 4. Add a manual card using the configuration below. Replace the entity IDs with the actual IDs in your installation; older installations may use names such as `sensor.f1_drivers_driver_positions`.
 
 ### HACS / Marketplace custom repository
@@ -91,7 +91,7 @@ The preview is a separate page using explicitly labelled synthetic data. It is n
 
 ## Project logo
 
-The original project logo is included in [brand/](brand/), and appears here and on the Marketplace repository detail page. The Marketplace currently uses a fixed category symbol for dashboard cards in its list; custom list icons are supported only for integrations. See [branding notes](docs/branding.md).
+The original project logo is included in [brand/](https://github.com/maikelfuhrmann/ha-f1-circle-of-doom-card/tree/main/brand), and appears here and on the Marketplace repository detail page. The Marketplace currently uses a fixed category symbol for dashboard cards in its list; custom list icons are supported only for integrations. See [branding notes](docs/branding.md).
 
 ## Support this project
 
