@@ -1,4 +1,4 @@
-/* F1 Circle of Doom Card v0.2.0 | MIT | maikelfuhrmann */
+/* F1 Circle of Doom Card v0.2.1 | MIT | maikelfuhrmann */
 /** Green defaults: Formula1.com race previews. VSC: heuristic 65% of green,
  * rounded to 0.1s; not measured VSC data. See docs/presets.md. */
 const CIRCUITS = [
