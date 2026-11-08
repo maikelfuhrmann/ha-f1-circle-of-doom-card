@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="de"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Circle of Doom · Demo</title>
+<style>body{margin:0;background:#090f19;color:#eef2f7;font-family:system-ui,sans-serif;padding:28px}main{max-width:1000px;margin:auto}h1{font-size:18px;margin:0 0 8px}p{color:#9daec5;font-size:13px}nav{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0}nav button{cursor:pointer;border:1px solid #3d4a61;background:#1b273b;color:#eee;border-radius:7px;padding:9px 12px}.demo{color:#ffbd6c;font-weight:700}.narrow{max-width:370px}@media(max-width:500px){body{padding:12px}}</style>
+<main><h1>Circle of Doom</h1><p class="demo">DEMO · ausschließlich synthetische Testdaten · kein laufendes Rennen</p><nav><button data-scenario="race">Rennen</button><button data-scenario="safety">Safety Car</button><button data-scenario="stale">Veraltete Daten</button><button data-scenario="lapped">Überrundung</button><button data-scenario="empty">Zwischen Sessions</button><button id="size">Mobil / Breit</button></nav><div id="container"><f1-circle-of-doom-card></f1-circle-of-doom-card></div></main>
+<script type="module">
+import '../dist/f1-circle-of-doom-card.js';
+const card=document.querySelector('f1-circle-of-doom-card');
+card.setConfig({type:'custom:f1-circle-of-doom-card',entity:'sensor.timing',session_entity:'sensor.session',session_status_entity:'sensor.status',track_status_entity:'sensor.track',driver:'4',pit_loss:22,uncertainty:2});
+let scenario='race';
+function update(){
+ const entries=[['4','NOR','#ff8700',0],['1','VER','#4781f6',4.2],['16','LEC','#e8454c',10.8],['63','RUS','#36dbbf',18.2],['81','PIA','#ff8700',23.5],['44','HAM','#e8454c',28.6],['14','ALO','#39bf9c',34],['23','ALB','#54aaff',42.1],['55','SAI','#54aaff',47.3],['10','GAS','#fc8ac4',54.7]];
+ const drivers=entries.map(([id,code,color,gap],i)=>({racing_number:id,tla:code,name:code,team_color:color,current_position:String(i+1),gap_to_leader:i?`+${gap}`:'',laps:{10:'1:12.100',11:'1:11.800',12:'1:12.300'}}));
+ if(scenario==='lapped')drivers.at(-1).gap_to_leader='+1 LAP';
+ const states={'sensor.timing':{state:'12',last_updated:new Date(Date.now()-(scenario==='stale'?120000:0)).toISOString(),attributes:{drivers:scenario==='empty'?[]:drivers}},'sensor.session':{state:'Race',attributes:{active:true}},'sensor.status':{state:scenario==='empty'?'ended':'live'},'sensor.track':{state:scenario==='safety'?'SC':'CLEAR'}};
+ card.hass={states};
+}
+document.querySelectorAll('[data-scenario]').forEach(b=>b.onclick=()=>{scenario=b.dataset.scenario;update()});document.querySelector('#size').onclick=()=>document.querySelector('#container').classList.toggle('narrow');
+update();setInterval(update,10000);
+</script></html>

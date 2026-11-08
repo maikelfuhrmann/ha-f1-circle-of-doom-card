@@ -1,0 +1,12 @@
+type: custom:f1-circle-of-doom-card
+title: Circle of Doom
+entity: sensor.f1_driver_positions
+session_entity: sensor.f1_current_session
+session_status_entity: sensor.f1_session_status
+track_status_entity: sensor.f1_track_status
+pit_loss: 22
+uncertainty: 2
+stale_after: 90
+grid_options:
+  columns: full
+  rows: auto
