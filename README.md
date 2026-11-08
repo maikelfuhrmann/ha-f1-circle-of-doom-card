@@ -1,8 +1,12 @@
+<p align="center">
+  <img src="brand/logo.png" alt="Circle of Doom logo: racing car inside a white timing ring with a red pit window" width="160" height="160">
+</p>
+
 # F1 Circle of Doom Card
 
 A timing-based **pit-stop rejoin estimate** for Home Assistant and [F1 Sensor](https://github.com/Nicxe/f1_sensor). Public timing is enough — no F1TV subscription, account token, GPS feed or external JavaScript library required.
 
-**v0.2.0 · Experimental.** This is a gap-based estimate, not a professional strategy system or a live track map. The interface is English.
+**v0.2.1 · Experimental.** This is a gap-based estimate, not a professional strategy system or a live track map. The interface is English.
 
 ![Circle of Doom with synthetic demo data](docs/preview.jpg)
 
@@ -29,7 +33,7 @@ A timing-based **pit-stop rejoin estimate** for Home Assistant and [F1 Sensor](h
 ### HACS / Marketplace custom repository
 
 The repository contains a HACS manifest and a built JavaScript module in `dist`.
-Add `https://github.com/maikelfuhrmann/ha-f1-circle-of-doom-card` as a custom **Dashboard** repository, then install it. This repository is not part of the default catalog. Manual installation is the verified installation path for this first release; HACS installation has not yet been end-to-end tested.
+Add `https://github.com/maikelfuhrmann/ha-f1-circle-of-doom-card` as a custom **Dashboard** repository, then install it. This repository is not part of the default catalog. Manual installation and updates through the Home Assistant 2026.11 Marketplace are supported.
 
 ```yaml
 type: custom:f1-circle-of-doom-card
@@ -84,6 +88,10 @@ npm run preview     # http://127.0.0.1:8766/examples/preview.html
 ```
 
 The preview is a separate page using explicitly labelled synthetic data. It is never used as a fallback in Home Assistant. `src/presets.js` contains circuit defaults and selection; `src/model.js` contains the pure calculation; `src/card.js` renders the custom element. `npm run build` generates the standalone distribution file. CI checks that committed output matches the source.
+
+## Project logo
+
+The original project logo is included in [brand/](brand/), and appears here and on the Marketplace repository detail page. The Marketplace currently uses a fixed category symbol for dashboard cards in its list; custom list icons are supported only for integrations. See [branding notes](docs/branding.md).
 
 ## Support this project
 

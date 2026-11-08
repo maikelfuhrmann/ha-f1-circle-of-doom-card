@@ -1,6 +1,6 @@
 {
   "name": "ha-f1-circle-of-doom-card",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "description": "Timing-based pit window for Home Assistant and F1 Sensor",
