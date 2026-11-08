@@ -1,4 +1,4 @@
-/* F1 Circle of Doom Card v0.2.2 | MIT | maikelfuhrmann */
+/* F1 Circle of Doom Card v0.2.3 | MIT | maikelfuhrmann */
 /** Green defaults: Formula1.com race previews. VSC: heuristic 65% of green,
  * rounded to 0.1s; not measured VSC data. See docs/presets.md. */
 const CIRCUITS = [
@@ -397,12 +397,15 @@ function project(drivers, selected, loss, uncertainty) {
   // Equal gaps are deliberately counted ahead: no promise of a safe release at a tie.
   const rank = delta => 1 + others.filter(d => d.gap <= selected.gap + delta + 0.001).length;
   const target = selected.gap + loss;
-  const ahead = others.filter(d => d.gap <= target).at(-1);
-  const behind = others.find(d => d.gap > target);
+  const before = others.filter(d => d.gap <= target + 0.001);
+  const after = others.filter(d => d.gap > target + 0.001);
+  const ahead = before.at(-1), behind = after[0];
+  const order = [...before, { ...selected, gap: target }, ...after]
+    .map((d, i) => ({ ...d, projectedPosition: i + 1, selected: d.id === selected.id }));
   return {
     rank: rank(loss), best: rank(Math.max(0, loss - uncertainty)), worst: rank(loss + uncertainty),
-    target, ahead, behind,
-    aheadGap: ahead ? target - ahead.gap : null,
+    target, ahead, behind, order,
+    aheadGap: ahead ? Math.max(0, target - ahead.gap) : null,
     behindGap: behind ? behind.gap - target : null,
   };
 }
@@ -442,16 +445,37 @@ function buildModel(states, config, selectedId, now = Date.now(), overrides = {}
     prediction: project(drivers, selected, settings.loss, config.uncertainty) };
 }
 
+// Labels are spread independently of the timing markers. Markers never move off
+// their true time-gap angle, even when several cars have nearly identical gaps.
+function circlePoint(seconds, lap, radius = 125) {
+  const angle = seconds / lap * Math.PI * 2 - Math.PI / 2;
+  return [220 + radius * Math.cos(angle), 220 + radius * Math.sin(angle)];
+}
+
+function circleLabels(drivers, lap) {
+  const items = drivers.map(d => {
+    const pos = circlePoint(d.gap, lap);
+    return { id: d.id, pos, side: pos[0] < 220 ? 'left' : 'right', y: pos[1] };
+  });
+  for (const side of ['left', 'right']) {
+    const rows = items.filter(d => d.side === side).sort((a, b) => a.y - b.y);
+    const spacing = Math.min(17, 350 / Math.max(1, rows.length - 1));
+    let previous = 45 - spacing;
+    for (const row of rows) { row.y = Math.max(45, row.y, previous + spacing); previous = row.y; }
+    let next = 395 + spacing;
+    for (const row of rows.toReversed()) { row.y = Math.min(row.y, next - spacing); next = row.y; }
+    for (const row of rows) { row.y = Math.max(45, Math.min(395, row.y)); row.x = side === 'left' ? 51 : 389; row.elbow = side === 'left' ? 76 : 364; }
+  }
+  return items;
+}
+
 
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const fixed = value => Number(value).toFixed(1);
-const point = (seconds, lap, radius = 137) => {
-  const angle = seconds / lap * Math.PI * 2 - Math.PI / 2;
-  return [200 + radius * Math.cos(angle), 200 + radius * Math.sin(angle)];
-};
+const point = circlePoint;
 const arc = (start, end, lap) => {
   const a = point(start, lap), b = point(end, lap);
-  return `M ${a.join(' ')} A 137 137 0 ${end - start > lap / 2 ? 1 : 0} 1 ${b.join(' ')}`;
+  return `M ${a.join(' ')} A 125 125 0 ${end - start > lap / 2 ? 1 : 0} 1 ${b.join(' ')}`;
 };
 
 class F1CircleOfDoomCard extends HTMLElement {
@@ -563,8 +587,9 @@ class F1CircleOfDoomCard extends HTMLElement {
           <div class="visual">${this._circle(m, c)}<div class="legend"><span><i class="dot"></i>Drivers</span><span><i class="window"></i>Pit window</span><span><i class="ghost"></i>After stop</span></div></div>
           <section class="insights" aria-label="Rejoin estimate">
             <div class="eyebrow">ESTIMATED AFTER THE STOP</div>
-            <div class="result">${p ? `P${p.rank}` : '—'}<span>${p ? `P${p.best}–P${p.worst} with uncertainty` : 'No prediction yet'}</span></div>
-            ${p ? `<div class="neighbors"><div><small>AHEAD</small><strong>${p.ahead ? escapeHtml(p.ahead.code) : 'Clear track'}</strong><span>${p.ahead ? `${fixed(p.aheadGap)} s gap` : 'Nobody ahead'}</span></div><div><small>BEHIND</small><strong>${p.behind ? escapeHtml(p.behind.code) : 'Back of field'}</strong><span>${p.behind ? `${fixed(p.behindGap)} s gap` : 'Nobody behind'}</span></div></div>` : ''}
+            <div class="result">${p ? `~P${p.rank}` : '—'}<span>${p ? `P${p.best}–P${p.worst} with uncertainty` : 'No prediction yet'}</span></div>
+            ${p ? `<div class="calculation"><div><span>Current gap</span><b>${fixed(m.selected.gap)} s</b></div><div><span>+ Pit loss</span><b>${fixed(c.pit_loss)} s</b></div><div><span>= Rejoin offset</span><b>${fixed(p.target)} s</b></div><small>Relative to the current leader · ${p.rank - 1} ${p.rank === 2 ? 'car' : 'cars'} ahead after this stop</small></div><div class="neighbors"><div><small>AHEAD</small><strong>${p.ahead ? escapeHtml(p.ahead.code) : 'Clear track'}</strong><span>${p.ahead ? `${fixed(p.aheadGap)} s gap` : 'Nobody ahead'}</span></div><div><small>BEHIND</small><strong>${p.behind ? escapeHtml(p.behind.code) : 'Back of field'}</strong><span>${p.behind ? `${fixed(p.behindGap)} s gap` : 'Nobody behind'}</span></div></div>` : ''}
+            ${p ? `<div class="order-heading">Estimated order around rejoin</div><ol class="rejoin-order" aria-label="Estimated order after the stop">${p.order.filter(d => Math.abs(d.projectedPosition-p.rank)<=2).map(d=>`<li class="${d.selected?'focus':''}"><b>P${d.projectedPosition}</b><span>${escapeHtml(d.code)}${d.selected?' · after stop':''}</span><small>now P${d.position}</small></li>`).join('')}</ol>` : ''}
             <p class="notice ${m.ready ? '' : 'waiting'}" role="status">${escapeHtml(m.message)}</p>
             <p class="assumption">Assumed total loss: ${fixed(c.pit_loss)} ± ${fixed(c.uncertainty)} s relative to staying on track, including pit lane and tyre service. ${settings.mode === 'vsc' ? 'VSC transitions can invalidate this scenario.' : 'Adjust to current conditions.'}</p>
           </section>
@@ -585,24 +610,20 @@ class F1CircleOfDoomCard extends HTMLElement {
   }
   _circle(m, c) {
     const ticks = Array.from({ length: 12 }, (_, i) => {
-      const a = point(i, 12, 123), b = point(i, 12, 129);
-      return `<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke="#334155"/>`;
+      const a = point(i, 12, 113), b = point(i, 12, 119);
+      return `<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke="#526077"/>`;
     }).join('');
-    const shell = `<circle cx="200" cy="200" r="137" fill="none" stroke="#243044" stroke-width="16"/><circle cx="200" cy="200" r="111" fill="none" stroke="#273246" stroke-dasharray="2 7"/>${ticks}`;
-    if (!m.ready) return `<svg viewBox="0 0 400 400" role="img" aria-label="Circle of Doom waiting for reliable race data">${shell}<text x="200" y="195" text-anchor="middle" class="center-code">—</text><text x="200" y="226" text-anchor="middle" class="center-label">WAITING FOR DATA</text></svg>`;
+    const shell = `<circle cx="220" cy="220" r="125" fill="none" stroke="#243044" stroke-width="16"/><circle cx="220" cy="220" r="103" fill="none" stroke="#273246" stroke-dasharray="2 7"/>${ticks}`;
+    if (!m.ready) return `<svg viewBox="0 0 440 440" role="img" aria-label="Circle of Doom waiting for reliable race data">${shell}<text x="220" y="215" text-anchor="middle" class="center-code">—</text><text x="220" y="246" text-anchor="middle" class="center-label">WAITING FOR DATA</text></svg>`;
     const start = m.selected.gap + c.pit_loss - c.uncertainty, end = m.selected.gap + c.pit_loss + c.uncertainty;
     const ghost = point(m.prediction.target, m.lap);
-    // Spread labels over concentric lanes when gaps cluster; timing markers stay exact.
-    const occupied = [];
+    const labels = new Map(circleLabels(m.drivers, m.lap).map(l => [l.id, l]));
     const markers = m.drivers.map(d => {
-      const pos = point(d.gap, m.lap), a = d.gap / m.lap * 360;
-      let lane = 0;
-      while (lane < 3 && occupied.some(o => o.lane === lane && Math.min(Math.abs(a - o.angle), 360 - Math.abs(a - o.angle)) < 11)) lane++;
-      occupied.push({ lane, angle: a });
-      const label = point(d.gap, m.lap, 158 + lane * 12);
-      return `<g data-driver="${escapeHtml(d.id)}" role="button" tabindex="0" aria-label="${escapeHtml(d.code)}, Position ${d.position}, ${fixed(d.gap)} seconds behind" class="marker"><line x1="${pos[0]}" y1="${pos[1]}" x2="${label[0]}" y2="${label[1]}" stroke="${d.color}" opacity=".4"/><circle cx="${pos[0]}" cy="${pos[1]}" r="${d.id === m.selected.id ? 8 : 5}" fill="${d.color}" stroke="${d.id === m.selected.id ? '#fff' : '#111722'}" stroke-width="2"/><text x="${label[0]}" y="${label[1]}" dy=".35em" text-anchor="middle" fill="${d.id === m.selected.id ? '#fff' : d.color}" class="code">${escapeHtml(d.code)}</text></g>`;
+      const l = labels.get(d.id), selected = d.id === m.selected.id;
+      return `<g data-driver="${escapeHtml(d.id)}" role="button" tabindex="0" aria-label="${escapeHtml(d.code)}, Position ${d.position}, ${fixed(d.gap)} seconds behind" class="marker"><title>P${d.position} ${escapeHtml(d.code)} · +${fixed(d.gap)} s</title><polyline points="${l.pos.join(',')} ${l.elbow},${l.y} ${l.x},${l.y}" fill="none" stroke="${d.color}" opacity="${selected ? '.8' : '.35'}"/><circle cx="${l.pos[0]}" cy="${l.pos[1]}" r="${selected ? 8 : 5}" fill="${d.color}" stroke="${selected ? '#fff' : '#111722'}" stroke-width="2"/><rect x="${l.x - 23}" y="${l.y - 8}" width="46" height="17" rx="4" fill="#111722"/><text x="${l.x}" y="${l.y}" dy=".35em" text-anchor="middle" fill="${selected ? '#fff' : d.color}" class="code">${escapeHtml(d.code)}</text></g>`;
     }).join('');
-    return `<svg viewBox="0 0 400 400" role="group" aria-label="Time gaps on a circle, leader at twelve o’clock; gaps increase clockwise">${shell}<path d="${arc(start, end, m.lap)}" fill="none" stroke="#ff453a" stroke-width="22" opacity=".8"/><path d="${arc(m.selected.gap, m.prediction.target, m.lap)}" fill="none" stroke="#ff8a82" stroke-width="2" stroke-dasharray="3 5"/>${markers}<rect x="${ghost[0] - 5}" y="${ghost[1] - 5}" width="10" height="10" fill="#fff" stroke="#ff453a" stroke-width="2" transform="rotate(45 ${ghost[0]} ${ghost[1]})"/><text x="200" y="176" text-anchor="middle" class="center-label">FOCUS</text><text x="200" y="213" text-anchor="middle" class="center-code">${escapeHtml(m.selected.code)}</text><text x="200" y="240" text-anchor="middle" class="center-label">P${m.selected.position} → ~ P${m.prediction.rank}</text></svg>`;
+    const scale = [0,1,2,3].map(i => {const p=point(i,4,94);return `<text x="${p[0]}" y="${p[1]}" dy=".35em" text-anchor="middle" class="scale">${i?'+'+fixed(m.lap*i/4)+' s':'0 s'}</text>`;}).join('');
+    return `<svg viewBox="0 0 440 440" role="group" aria-label="Time gaps on a circle, leader at twelve o’clock; gaps increase clockwise">${shell}${scale}<path d="${arc(start, end, m.lap)}" fill="none" stroke="#ff453a" stroke-width="22" opacity=".8"/><path d="${arc(m.selected.gap, m.prediction.target, m.lap)}" fill="none" stroke="#ff8a82" stroke-width="2" stroke-dasharray="3 5"/>${markers}<rect x="${ghost[0] - 6}" y="${ghost[1] - 6}" width="12" height="12" fill="#fff" stroke="#ff453a" stroke-width="2" transform="rotate(45 ${ghost[0]} ${ghost[1]})"/><text x="220" y="195" text-anchor="middle" class="center-label">SELECTED</text><text x="220" y="230" text-anchor="middle" class="center-code">${escapeHtml(m.selected.code)}</text><text x="220" y="255" text-anchor="middle" class="center-label">NOW P${m.selected.position} → ~P${m.prediction.rank}</text></svg><p class="circle-caption">Leader at 12 o’clock · larger gaps run clockwise ↻<br>One full circle = ${fixed(m.lap)} s · time gaps, not track positions</p>`;
   }
 }
 
@@ -612,11 +633,13 @@ const STYLES = `
   header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:20px}h2{font-size:22px;letter-spacing:-.5px;margin:5px 0 0;font-weight:700}.eyebrow{font-size:10px;letter-spacing:1.8px;color:#9caec4;font-weight:700}.badge{font-size:9px;font-weight:800;letter-spacing:1px;border:1px solid #43516a;border-radius:20px;padding:7px 10px;color:#adbbcc}.badge.active{color:#ffaba5;border-color:#7a3838;background:#ff453a12}
   .controls{display:grid;grid-template-columns:1.8fr 1fr 1fr;gap:12px}label{font-size:11px;color:#bdcadb;font-weight:600}label>span{color:#8291a7}input,select{display:block;width:100%;margin-top:7px;border:1px solid #354158;border-radius:9px;background:#192232;color:#f2f5f9;padding:10px;font:inherit;font-size:13px;min-width:0;color-scheme:dark}input:focus,select:focus{outline:2px solid #ff756d;outline-offset:2px}select:disabled{opacity:.6}
   .preset{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:14px;padding:12px;border:1px solid #29364c;border-radius:10px;background:#151e2c}.preset strong{font-size:13px;display:block}.preset span{display:block;font-size:10px;color:#9caec4;margin-top:4px}.preset button{font:inherit;font-size:10px;flex-shrink:0;cursor:pointer;color:#dbe5f4;background:#253249;border:1px solid #40516b;border-radius:7px;padding:8px}.preset button:disabled{opacity:.4;cursor:default}.preset button:focus-visible{outline:2px solid #ff756d}.preset-note{font-size:11px;color:#dcb977;line-height:1.5;margin:8px 0 0}
-  .layout{display:grid;grid-template-columns:minmax(0,1.12fr) minmax(0,1fr);gap:22px;align-items:center;margin-top:10px}.visual svg{width:100%;display:block;overflow:visible}.code{font-size:10px;font-weight:750}.center-code{fill:#fff;font-size:40px;font-weight:800;letter-spacing:-1px}.center-label{fill:#9caec4;font-size:10px;letter-spacing:1px}.marker{cursor:pointer}.marker:focus{outline:none}.marker:focus circle{stroke:white;stroke-width:4px}
+  .layout{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:22px;align-items:center;margin-top:10px}.visual svg{width:100%;display:block;overflow:visible}.code{font-size:14px;font-weight:750}.center-code{fill:#fff;font-size:40px;font-weight:800;letter-spacing:-1px}.center-label{fill:#9caec4;font-size:10px;letter-spacing:1px}.marker{cursor:pointer}.marker:focus{outline:none}.marker:focus circle{stroke:white;stroke-width:4px}
   .legend{display:flex;justify-content:center;flex-wrap:wrap;gap:13px;font-size:10px;color:#a9b8cc}.legend span{display:flex;align-items:center;gap:5px}.dot{width:7px;height:7px;border-radius:50%;background:#a9b8cc}.window{width:14px;height:5px;background:#ff453a;border-radius:2px}.ghost{width:7px;height:7px;background:white;transform:rotate(45deg)}
   .insights{padding:20px 0}.result{font-size:68px;font-weight:800;line-height:1.1;letter-spacing:-3px;margin:12px 0 19px}.result>span{display:block;font-size:12px;letter-spacing:0;color:#b5c3d5;font-weight:500;margin-top:7px}.neighbors{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid #293449;border-bottom:1px solid #293449;padding:15px 0;gap:10px}.neighbors div{display:flex;flex-direction:column;gap:5px}.neighbors small{font-size:9px;letter-spacing:1.5px;color:#9caec4}.neighbors strong{font-size:19px}.neighbors span{font-size:11px;color:#adbbcd}.notice{font-size:12px;line-height:1.6;color:#a7e3c2}.notice.waiting{border-left:2px solid #e9b65b;padding-left:12px;color:#e7cb9b}.assumption{font-size:11px;line-height:1.6;color:#98a9bf;margin:10px 0 0}
   details{margin-top:16px;border-top:1px solid #293449;padding-top:14px;font-size:12px}summary{cursor:pointer;color:#b7c5d8}.driver-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:12px}.driver-row{display:flex;justify-content:space-between;gap:8px;background:#182131;border:1px solid #29364c;border-left:3px solid var(--team);border-radius:6px;padding:8px;color:#c8d5e6;font-size:11px;cursor:pointer}.driver-row.selected{background:#2d3445;border-color:#8292aa}.driver-row span{white-space:nowrap}.driver-row:focus-visible{outline:2px solid white}
   footer{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-top:20px;padding-top:13px;border-top:1px solid #293449;font-size:9px;color:#889bb4}
+  .scale{fill:#91a1b8;font-size:10px}.circle-caption{text-align:center;color:#9caec4;font-size:11px;line-height:1.6;margin:-5px 0 15px}.calculation{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;border:1px solid #344257;border-radius:9px;padding:12px;margin-bottom:15px;background:#192232}.calculation div{display:flex;flex-direction:column;gap:7px}.calculation span{font-size:10px;color:#a9b8cc}.calculation b{font-size:16px}.calculation small{grid-column:1/-1;color:#a9b8cc;font-size:10px;line-height:1.6}.order-heading{font-size:11px;color:#b7c5d8;margin-top:16px}.rejoin-order{list-style:none;margin:16px 0;padding:0}.rejoin-order li{display:grid;grid-template-columns:35px 1fr auto;gap:8px;padding:8px;font-size:11px;border-bottom:1px solid #293449}.rejoin-order .focus{background:#ff453a18;border-left:3px solid #ff453a}.rejoin-order small{color:#9caec4}.visual{min-width:0}
+  @container(max-width:850px){.layout{grid-template-columns:1fr;gap:0}.visual{max-width:520px;width:100%;margin:auto}.insights{padding:22px 0 0}}
   @container(max-width:580px){ha-card{padding:18px}.layout{grid-template-columns:1fr;gap:0}.visual{max-width:390px;width:100%;margin:auto}.insights{padding:22px 0 0}.result{font-size:55px;margin:10px 0 15px}.controls{grid-template-columns:1fr 1fr;gap:10px}.controls label:first-child{grid-column:1/-1}.neighbors{padding:12px 0}h2{font-size:21px}.driver-grid{grid-template-columns:1fr 1fr}}
   @container(max-width:330px){ha-card{padding:12px}.badge{padding:5px;font-size:8px}h2{font-size:18px}.driver-grid{grid-template-columns:1fr}}
 `;
