@@ -11,7 +11,7 @@ function update(){
  let entries=[['4','NOR','#ff8700',0],['1','VER','#4781f6',4.2],['16','LEC','#e8454c',10.8],['63','RUS','#36dbbf',18.2],['81','PIA','#ff8700',23.5],['44','HAM','#e8454c',28.6],['14','ALO','#39bf9c',34],['23','ALB','#54aaff',42.1],['55','SAI','#54aaff',47.3],['10','GAS','#fc8ac4',54.7]];
  if(scenario==='packed')entries=Array.from({length:22},(_,i)=>[String(i+1),['ANT','NOR','RUS','HAD','VER','LAW','PIA','HUL','ALB','BEA','LIN','LEC','ALO','HAM','GAS','COL','SAI','STR','BOR','CAM','PER','BOT'][i],['#36dbbf','#ff8700','#4781f6','#e8454c','#54aaff'][i%5],i?8+i*.15:0]);
  const drivers=entries.map(([id,code,color,gap],i)=>({racing_number:id,tla:code,name:code,team_color:color,current_position:String(i+1),gap_to_leader:i?`+${gap}`:'Lap 12',laps:{10:'1:12.100',11:'1:11.800',12:'1:12.300'}}));
- if(scenario==='lapped')drivers.at(-1).gap_to_leader='+1 LAP';
+ if(scenario==='lapped'){drivers[7].gap_to_leader='1 L';drivers[7].interval_to_position_ahead='+49.4';drivers[8].gap_to_leader='+1 LAP';drivers[8].interval_to_position_ahead='+12';drivers[9].gap_to_leader='2 L';drivers[9].interval_to_position_ahead='+76';}
  const states={'sensor.timing':{state:'12',last_updated:new Date(Date.now()-(scenario==='stale'?120000:0)).toISOString(),attributes:{drivers:scenario==='empty'?[]:drivers}},'sensor.session':{state:'Race',attributes:{active:true,circuit_short_name:document.querySelector('#circuit').value}},'sensor.status':{state:scenario==='empty'?'ended':'live'},'sensor.track':{state:scenario==='safety'?'SC':scenario==='vsc'?'VSC':'CLEAR'}};
  card.hass={states};
 }
