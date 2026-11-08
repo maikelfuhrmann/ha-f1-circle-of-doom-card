@@ -54,3 +54,20 @@ test('VSC retains stale-data, pit-activity and session guards',()=>{
 test('uncertainty beyond active circuit loss blocks projection',()=>{
   const s=data();s['sensor.track'].state='VSC';assert.equal(model(s,'1',{...config,uncertainty:15}).reason,'settings');
 });
+
+test('leader lap counter is not a lap deficit and cannot pause the field',()=>{
+  for(const value of ['Lap 12','LAP 12','Lap 1','Runde 12']){
+    const s=data();s['sensor.timing'].attributes.drivers[0].gap_to_leader=value;
+    const m=model(s);assert.equal(m.ready,true,value);assert.equal(m.selected.gap,0);assert.equal(m.prediction.rank,4);
+  }
+});
+test('only an explicit positive lap deficit triggers the lapped guard',()=>{
+  for(const value of ['+1 LAP','1 Lap','+2 LAPS','2 Runden']){
+    const s=data();s['sensor.timing'].attributes.drivers[5].gap_to_leader=value;
+    assert.equal(model(s).reason,'lapped',value);
+  }
+  for(const value of ['Lap 12','no lap data','0 LAPS']){
+    const s=data();s['sensor.timing'].attributes.drivers[5].gap_to_leader=value;
+    assert.equal(model(s).reason,'gaps',value);
+  }
+});
