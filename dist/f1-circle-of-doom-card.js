@@ -1,0 +1,253 @@
+/* F1 Circle of Doom Card v0.1.0 | MIT | maikelfuhrmann */
+/** Pure timing model. All inputs are HA entity snapshots; no network access. */
+function seconds(value) {
+  if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? value : null;
+  if (typeof value !== 'string') return null;
+  const s = value.trim().replace(',', '.');
+  if (/^\+?\d+(\.\d+)?$/.test(s)) return Number(s.replace('+', ''));
+  const match = s.match(/^(\d+):([0-5]\d(?:\.\d+)?)$/);
+  return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+}
+
+function normaliseDrivers(input) {
+  if (!Array.isArray(input)) return [];
+  return input.filter(d => d && typeof d === 'object').map(d => ({
+    id: String(d.racing_number ?? d.tla ?? ''),
+    code: String(d.tla ?? d.racing_number ?? '?'),
+    name: String(d.name ?? d.tla ?? '?'),
+    color: /^#?[0-9a-f]{6}$/i.test(d.team_color ?? '') ? `#${d.team_color.replace('#', '')}` : '#94a3b8',
+    position: Number(d.current_position),
+    gap: Number(d.current_position) === 1 ? 0 : seconds(d.gap_to_leader),
+    gapLabel: String(d.gap_to_leader ?? ''),
+    lapped: /lap|runde/i.test(String(d.gap_to_leader ?? '')),
+    retired: d.retired === true || d.status === 'out',
+    inPit: d.in_pit === true || d.pit_out === true || ['pit_in', 'pit_out'].includes(d.status),
+    stopped: d.stopped === true,
+    laps: d.laps && typeof d.laps === 'object' ? d.laps : {},
+  })).sort((a, b) => a.position - b.position);
+}
+
+function referenceLap(driver, override) {
+  if (override != null) return seconds(override);
+  const recent = Object.entries(driver?.laps ?? {})
+    .filter(([lap]) => /^\d+$/.test(lap))
+    .sort((a, b) => Number(b[0]) - Number(a[0])).slice(0, 3)
+    .map(([, time]) => seconds(time)).filter(t => t !== null && t >= 35 && t <= 240);
+  if (recent.length < 2) return null;
+  recent.sort((a, b) => a - b);
+  return recent.length % 2 ? recent[Math.floor(recent.length / 2)] : (recent[0] + recent[1]) / 2;
+}
+
+function timestamp(entity) {
+  const raw = entity?.last_reported ?? entity?.last_updated;
+  const value = Date.parse(raw ?? '');
+  return Number.isFinite(value) ? value : null;
+}
+
+function validateConfig(config) {
+  if (!config || !config.entity) throw new Error('Timing-Entity fehlt: entity: sensor.f1_driver_positions');
+  for (const key of ['entity', 'session_entity', 'session_status_entity', 'track_status_entity']) {
+    if (typeof config[key] !== 'string' || !/^sensor\.[a-z0-9_]+$/.test(config[key])) {
+      throw new Error(`${key}: Bitte eine passende Sensor-Entity angeben.`);
+    }
+  }
+  const c = { title: 'Circle of Doom', pit_loss: 22, uncertainty: 2, stale_after: 90, ...config };
+  for (const [key, min, max] of [['pit_loss', 1, 120], ['uncertainty', 0, 30], ['stale_after', 15, 600]]) {
+    if (typeof c[key] !== 'number' || !Number.isFinite(c[key]) || c[key] < min || c[key] > max) {
+      throw new Error(`${key} muss eine Zahl zwischen ${min} und ${max} sein.`);
+    }
+  }
+  if (c.uncertainty >= c.pit_loss) throw new Error('uncertainty muss kleiner als pit_loss sein.');
+  if (c.reference_lap_seconds != null && (typeof c.reference_lap_seconds !== 'number' || !Number.isFinite(c.reference_lap_seconds) || c.reference_lap_seconds < 35 || c.reference_lap_seconds > 240)) {
+    throw new Error('reference_lap_seconds muss zwischen 35 und 240 liegen.');
+  }
+  return c;
+}
+
+function project(drivers, selected, loss, uncertainty) {
+  const others = drivers.filter(d => d.id !== selected.id);
+  // Equal gaps are deliberately counted ahead: no promise of a safe release at a tie.
+  const rank = delta => 1 + others.filter(d => d.gap <= selected.gap + delta + 0.001).length;
+  const target = selected.gap + loss;
+  const ahead = others.filter(d => d.gap <= target).at(-1);
+  const behind = others.find(d => d.gap > target);
+  return {
+    rank: rank(loss), best: rank(Math.max(0, loss - uncertainty)), worst: rank(loss + uncertainty),
+    target, ahead, behind,
+    aheadGap: ahead ? target - ahead.gap : null,
+    behindGap: behind ? behind.gap - target : null,
+  };
+}
+
+function buildModel(states, config, selectedId, now = Date.now()) {
+  const timing = states?.[config.entity];
+  const session = states?.[config.session_entity];
+  const status = states?.[config.session_status_entity];
+  const track = states?.[config.track_status_entity];
+  const drivers = normaliseDrivers(timing?.attributes?.drivers).filter(d => !d.retired);
+  const selected = drivers.find(d => d.id === String(selectedId ?? config.driver ?? '')) ?? drivers[0];
+  const base = { drivers, selected, ready: false, lap: null, prediction: null,
+    updated: timestamp(timing), track: track?.state ?? 'unknown', session: session?.state ?? 'unknown' };
+  const stop = (reason, message) => ({ ...base, reason, message });
+  if (!timing || !session || !status || !track) return stop('configuration', 'Timing-, Session- und Streckenstatus-Sensoren zuordnen und in F1 Sensor aktivieren.');
+  if (status.state !== 'live') return stop('idle', 'Wartet auf ein laufendes Rennen oder einen Sprint.');
+  if (!['Race', 'Sprint'].includes(session.state)) return stop('session', 'Das Boxenstoppfenster ist nur für Rennen und Sprint verfügbar.');
+  if (track.state !== 'CLEAR') return stop('track', ['SC', 'VSC', 'RED', 'YELLOW'].includes(track.state)
+    ? `Prognose pausiert: ${track.state}. Die Abstände und der Boxenstoppverlust sind unter diesen Bedingungen nicht verlässlich.`
+    : 'Streckenstatus fehlt. Keine Prognose möglich.');
+  if (session.attributes?.active === false || ['unknown', 'unavailable'].includes(timing.state)) return stop('idle', 'Keine aktuellen Timing-Daten verfügbar.');
+  // Timing changes continuously. Stable status entities can legitimately have old last_updated.
+  const updated = timestamp(timing);
+  if (updated === null || now - updated > config.stale_after * 1000 || updated > now + 10000) return stop('stale', 'Timing-Daten sind veraltet oder ohne gültigen Zeitstempel. Prognose pausiert.');
+  if (drivers.length < 2) return stop('empty', 'Wartet auf die Abstände der Fahrer.');
+  if (drivers.some((d, i) => !d.id || d.position !== i + 1) || new Set(drivers.map(d => d.id)).size !== drivers.length) return stop('order', 'Die Fahrerreihenfolge ist unvollständig. Prognose pausiert.');
+  if (drivers.some(d => d.lapped)) return stop('lapped', 'Überrundete Fahrer im Feld: Ohne genaue Rundenzuordnung ist keine sichere Rückkehrprognose möglich.');
+  if (drivers.some(d => d.gap === null)) return stop('gaps', 'Zeitabstände fehlen. Prognose pausiert, bis alle aktiven Fahrer zugeordnet werden können.');
+  if (drivers.some((d, i) => i > 0 && d.gap < drivers[i - 1].gap)) return stop('order', 'Zeitabstände und Reihenfolge sind noch nicht synchron.');
+  if (drivers.some(d => d.inPit || d.stopped)) return stop('pit', 'Ein Fahrer ist in der Box, auf der Ausfahrt oder angehalten. Das Feld muss sich zuerst neu sortieren.');
+  base.lap = referenceLap(drivers[0], config.reference_lap_seconds);
+  if (base.lap === null) return stop('pace', 'Wartet auf mindestens zwei verwertbare Rundenzeiten des Führenden.');
+  if (drivers.some(d => d.gap >= base.lap) || selected.gap + config.pit_loss + config.uncertainty >= base.lap) return stop('lap_boundary', 'Das Fenster überschreitet eine Referenzrunde. Prognose wegen möglicher Überrundung pausiert.');
+  return { ...base, ready: true, reason: 'estimate', message: 'Schätzung aus Zeitabständen · kein GPS',
+    prediction: project(drivers, selected, config.pit_loss, config.uncertainty) };
+}
+
+
+const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const fixed = value => Number(value).toFixed(1);
+const point = (seconds, lap, radius = 137) => {
+  const angle = seconds / lap * Math.PI * 2 - Math.PI / 2;
+  return [200 + radius * Math.cos(angle), 200 + radius * Math.sin(angle)];
+};
+const arc = (start, end, lap) => {
+  const a = point(start, lap), b = point(end, lap);
+  return `M ${a.join(' ')} A 137 137 0 ${end - start > lap / 2 ? 1 : 0} 1 ${b.join(' ')}`;
+};
+
+class F1CircleOfDoomCard extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this.shadowRoot.addEventListener('input', event => {
+      const target = event.target;
+      if (!['loss', 'uncertainty'].includes(target.id)) return;
+      const key = target.id === 'loss' ? 'pit_loss' : 'uncertainty';
+      try {
+        this._config = validateConfig({ ...this._config, [key]: target.value === '' ? NaN : Number(target.value) });
+        target.setCustomValidity('');
+      } catch (error) { target.setCustomValidity(error.message); }
+    });
+    this.shadowRoot.addEventListener('change', event => {
+      const target = event.target;
+      if (target.id === 'driver') this._selected = target.value;
+      if (['loss', 'uncertainty'].includes(target.id)) {
+        const key = target.id === 'loss' ? 'pit_loss' : 'uncertainty';
+        try { this._config = validateConfig({ ...this._config, [key]: Number(target.value) }); }
+        catch (error) { target.setCustomValidity(error.message); target.reportValidity(); return; }
+      }
+      this._render();
+    });
+    this.shadowRoot.addEventListener('click', event => {
+      const button = event.target.closest('[data-driver]');
+      if (button) { this._selected = button.dataset.driver; this._render(); }
+    });
+    this.shadowRoot.addEventListener('keydown', event => {
+      if (['Enter', ' '].includes(event.key) && event.target.matches('[data-driver]')) {
+        event.preventDefault(); this._selected = event.target.dataset.driver; this._render();
+      }
+    });
+  }
+  setConfig(config) { this._config = validateConfig(config); this._selected = config.driver; this._render(); }
+  set hass(value) {
+    const previous = this._hass;
+    this._hass = value;
+    if (!this._config) return;
+    const keys = ['entity', 'session_entity', 'session_status_entity', 'track_status_entity'];
+    if (keys.some(k => previous?.states?.[this._config[k]] !== value.states?.[this._config[k]])) this._render();
+  }
+  connectedCallback() {
+    this._timer = setInterval(() => {
+      if (this._model?.ready && this._model.updated && Date.now() - this._model.updated > this._config.stale_after * 1000) this._render();
+    }, 5000);
+    this._render();
+  }
+  disconnectedCallback() { clearInterval(this._timer); }
+  getCardSize() { return 9; }
+  getGridOptions() { return { columns: 12, rows: 'auto', min_columns: 6 }; }
+  static getStubConfig() {
+    return { entity: 'sensor.f1_driver_positions', session_entity: 'sensor.f1_current_session', session_status_entity: 'sensor.f1_session_status', track_status_entity: 'sensor.f1_track_status', pit_loss: 22, uncertainty: 2 };
+  }
+  _render() {
+    if (!this._config || !this._hass || !this.isConnected) return;
+    const c = this._config, m = buildModel(this._hass.states, c, this._selected);
+    // Preserve input while typing, but invalidate unsafe/stale predictions immediately.
+    if (m.ready && this._model?.ready && this._renderingInput && ['INPUT', 'SELECT'].includes(this.shadowRoot.activeElement?.tagName)) return;
+    this._model = m;
+    const p = m.prediction;
+    const option = d => `<option value="${escapeHtml(d.id)}" ${d.id === m.selected?.id ? 'selected' : ''}>P${d.position} · ${escapeHtml(d.code)} — ${escapeHtml(d.name)}</option>`;
+    const stamp = m.updated ? new Date(m.updated).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
+    this.shadowRoot.innerHTML = `<style>${STYLES}</style>
+      <ha-card>
+        <header><div><div class="eyebrow">F1 · STRATEGIE</div><h2>${escapeHtml(c.title)}</h2></div><span class="badge ${m.ready ? 'active' : ''}">${m.ready ? 'SCHÄTZUNG' : 'PAUSIERT'}</span></header>
+        <div class="controls"><label>Fahrer<select id="driver" ${m.drivers.length ? '' : 'disabled'}>${m.drivers.length ? m.drivers.map(option).join('') : '<option>Wartet auf Fahrer</option>'}</select></label>
+          <label>Boxenstoppverlust <span>(s)</span><input id="loss" type="number" min="1" max="120" step="0.5" value="${c.pit_loss}" aria-label="Boxenstoppverlust in Sekunden"></label>
+          <label>Spielraum <span>(± s)</span><input id="uncertainty" type="number" min="0" max="30" step="0.5" value="${c.uncertainty}" aria-label="Spielraum in Sekunden"></label></div>
+        <div class="layout">
+          <div class="visual">${this._circle(m, c)}<div class="legend"><span><i class="dot"></i>Fahrer</span><span><i class="window"></i>Boxenfenster</span><span><i class="ghost"></i>Nach Stopp</span></div></div>
+          <section class="insights" aria-label="Rückkehrprognose">
+            <div class="eyebrow">VORAUSSICHTLICH NACH DEM STOPP</div>
+            <div class="result">${p ? `P${p.rank}` : '—'}<span>${p ? `P${p.best}–P${p.worst} mit Spielraum` : 'Noch keine Prognose'}</span></div>
+            ${p ? `<div class="neighbors"><div><small>DAVOR</small><strong>${p.ahead ? escapeHtml(p.ahead.code) : 'Freie Strecke'}</strong><span>${p.ahead ? `${fixed(p.aheadGap)} s Abstand` : 'Niemand voraus'}</span></div><div><small>DAHINTER</small><strong>${p.behind ? escapeHtml(p.behind.code) : 'Feldende'}</strong><span>${p.behind ? `${fixed(p.behindGap)} s Abstand` : 'Niemand dahinter'}</span></div></div>` : ''}
+            <p class="notice ${m.ready ? '' : 'waiting'}" role="status">${escapeHtml(m.message)}</p>
+            <p class="assumption">Annahme: ${fixed(c.pit_loss)} ± ${fixed(c.uncertainty)} s gesamter Zeitverlust gegenüber einer normalen Runde, inklusive Boxengasse und Reifenwechsel. An die Strecke anpassen.</p>
+          </section>
+        </div>
+        ${m.ready ? `<details><summary>Fahrer und Abstände</summary><div class="driver-grid">${m.drivers.map(d => `<button data-driver="${escapeHtml(d.id)}" class="driver-row ${d.id === m.selected.id ? 'selected' : ''}" style="--team:${d.color}"><b>P${d.position} ${escapeHtml(d.code)}</b><span>${d.position === 1 ? 'Leader' : `+${fixed(d.gap)} s`}</span></button>`).join('')}</div></details>` : ''}
+        <footer><span>Zeitabstands-Kreis · kein GPS</span><span>${m.lap ? `Referenzrunde ${fixed(m.lap)} s · ` : ''}Daten ${stamp}</span></footer>
+      </ha-card>`;
+    // Keep editable controls stable during unrelated HA changes and defer updates while typing.
+    for (const input of this.shadowRoot.querySelectorAll('input,select')) {
+      input.addEventListener('focus', () => { this._renderingInput = true; });
+      input.addEventListener('blur', () => { this._renderingInput = false; this._render(); }, { once: true });
+      input.addEventListener('change', () => { this._renderingInput = false; });
+    }
+  }
+  _circle(m, c) {
+    const ticks = Array.from({ length: 12 }, (_, i) => {
+      const a = point(i, 12, 123), b = point(i, 12, 129);
+      return `<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke="#334155"/>`;
+    }).join('');
+    const shell = `<circle cx="200" cy="200" r="137" fill="none" stroke="#243044" stroke-width="16"/><circle cx="200" cy="200" r="111" fill="none" stroke="#273246" stroke-dasharray="2 7"/>${ticks}`;
+    if (!m.ready) return `<svg viewBox="0 0 400 400" role="img" aria-label="Circle of Doom wartet auf verlässliche Renndaten">${shell}<text x="200" y="195" text-anchor="middle" class="center-code">—</text><text x="200" y="226" text-anchor="middle" class="center-label">WARTET AUF DATEN</text></svg>`;
+    const start = m.selected.gap + c.pit_loss - c.uncertainty, end = m.selected.gap + c.pit_loss + c.uncertainty;
+    const ghost = point(m.prediction.target, m.lap);
+    // Spread labels over concentric lanes when gaps cluster; timing markers stay exact.
+    const occupied = [];
+    const markers = m.drivers.map(d => {
+      const pos = point(d.gap, m.lap), a = d.gap / m.lap * 360;
+      let lane = 0;
+      while (lane < 3 && occupied.some(o => o.lane === lane && Math.min(Math.abs(a - o.angle), 360 - Math.abs(a - o.angle)) < 11)) lane++;
+      occupied.push({ lane, angle: a });
+      const label = point(d.gap, m.lap, 158 + lane * 12);
+      return `<g data-driver="${escapeHtml(d.id)}" role="button" tabindex="0" aria-label="${escapeHtml(d.code)}, Position ${d.position}, ${fixed(d.gap)} Sekunden Rückstand" class="marker"><line x1="${pos[0]}" y1="${pos[1]}" x2="${label[0]}" y2="${label[1]}" stroke="${d.color}" opacity=".4"/><circle cx="${pos[0]}" cy="${pos[1]}" r="${d.id === m.selected.id ? 8 : 5}" fill="${d.color}" stroke="${d.id === m.selected.id ? '#fff' : '#111722'}" stroke-width="2"/><text x="${label[0]}" y="${label[1]}" dy=".35em" text-anchor="middle" fill="${d.id === m.selected.id ? '#fff' : d.color}" class="code">${escapeHtml(d.code)}</text></g>`;
+    }).join('');
+    return `<svg viewBox="0 0 400 400" role="group" aria-label="Zeitabstände im Kreis, Führender bei zwölf Uhr; wachsender Rückstand im Uhrzeigersinn">${shell}<path d="${arc(start, end, m.lap)}" fill="none" stroke="#ff453a" stroke-width="22" opacity=".8"/><path d="${arc(m.selected.gap, m.prediction.target, m.lap)}" fill="none" stroke="#ff8a82" stroke-width="2" stroke-dasharray="3 5"/>${markers}<rect x="${ghost[0] - 5}" y="${ghost[1] - 5}" width="10" height="10" fill="#fff" stroke="#ff453a" stroke-width="2" transform="rotate(45 ${ghost[0]} ${ghost[1]})"/><text x="200" y="176" text-anchor="middle" class="center-label">FOKUS</text><text x="200" y="213" text-anchor="middle" class="center-code">${escapeHtml(m.selected.code)}</text><text x="200" y="240" text-anchor="middle" class="center-label">P${m.selected.position} → ~ P${m.prediction.rank}</text></svg>`;
+  }
+}
+
+const STYLES = `
+  :host{display:block;container-type:inline-size;color:#eef2f7;font-family:var(--primary-font-family,system-ui,sans-serif)}
+  *{box-sizing:border-box}ha-card{display:block;background:#111722;border:1px solid #253044;border-top:3px solid #ff453a;border-radius:20px;padding:22px;box-shadow:0 12px 32px #0002;color:#eef2f7}
+  header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:20px}h2{font-size:22px;letter-spacing:-.5px;margin:5px 0 0;font-weight:700}.eyebrow{font-size:10px;letter-spacing:1.8px;color:#9caec4;font-weight:700}.badge{font-size:9px;font-weight:800;letter-spacing:1px;border:1px solid #43516a;border-radius:20px;padding:7px 10px;color:#adbbcc}.badge.active{color:#ffaba5;border-color:#7a3838;background:#ff453a12}
+  .controls{display:grid;grid-template-columns:1.8fr 1fr 1fr;gap:12px}label{font-size:11px;color:#bdcadb;font-weight:600}label>span{color:#8291a7}input,select{display:block;width:100%;margin-top:7px;border:1px solid #354158;border-radius:9px;background:#192232;color:#f2f5f9;padding:10px;font:inherit;font-size:13px;min-width:0;color-scheme:dark}input:focus,select:focus{outline:2px solid #ff756d;outline-offset:2px}select:disabled{opacity:.6}
+  .layout{display:grid;grid-template-columns:minmax(0,1.12fr) minmax(0,1fr);gap:22px;align-items:center;margin-top:10px}.visual svg{width:100%;display:block;overflow:visible}.code{font-size:10px;font-weight:750}.center-code{fill:#fff;font-size:40px;font-weight:800;letter-spacing:-1px}.center-label{fill:#9caec4;font-size:10px;letter-spacing:1px}.marker{cursor:pointer}.marker:focus{outline:none}.marker:focus circle{stroke:white;stroke-width:4px}
+  .legend{display:flex;justify-content:center;flex-wrap:wrap;gap:13px;font-size:10px;color:#a9b8cc}.legend span{display:flex;align-items:center;gap:5px}.dot{width:7px;height:7px;border-radius:50%;background:#a9b8cc}.window{width:14px;height:5px;background:#ff453a;border-radius:2px}.ghost{width:7px;height:7px;background:white;transform:rotate(45deg)}
+  .insights{padding:20px 0}.result{font-size:68px;font-weight:800;line-height:1.1;letter-spacing:-3px;margin:12px 0 19px}.result>span{display:block;font-size:12px;letter-spacing:0;color:#b5c3d5;font-weight:500;margin-top:7px}.neighbors{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid #293449;border-bottom:1px solid #293449;padding:15px 0;gap:10px}.neighbors div{display:flex;flex-direction:column;gap:5px}.neighbors small{font-size:9px;letter-spacing:1.5px;color:#9caec4}.neighbors strong{font-size:19px}.neighbors span{font-size:11px;color:#adbbcd}.notice{font-size:12px;line-height:1.6;color:#a7e3c2}.notice.waiting{border-left:2px solid #e9b65b;padding-left:12px;color:#e7cb9b}.assumption{font-size:11px;line-height:1.6;color:#98a9bf;margin:10px 0 0}
+  details{margin-top:16px;border-top:1px solid #293449;padding-top:14px;font-size:12px}summary{cursor:pointer;color:#b7c5d8}.driver-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:12px}.driver-row{display:flex;justify-content:space-between;gap:8px;background:#182131;border:1px solid #29364c;border-left:3px solid var(--team);border-radius:6px;padding:8px;color:#c8d5e6;font-size:11px;cursor:pointer}.driver-row.selected{background:#2d3445;border-color:#8292aa}.driver-row span{white-space:nowrap}.driver-row:focus-visible{outline:2px solid white}
+  footer{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-top:20px;padding-top:13px;border-top:1px solid #293449;font-size:9px;color:#889bb4}
+  @container(max-width:580px){ha-card{padding:18px}.layout{grid-template-columns:1fr;gap:0}.visual{max-width:390px;width:100%;margin:auto}.insights{padding:22px 0 0}.result{font-size:55px;margin:10px 0 15px}.controls{grid-template-columns:1fr 1fr;gap:10px}.controls label:first-child{grid-column:1/-1}.neighbors{padding:12px 0}h2{font-size:21px}.driver-grid{grid-template-columns:1fr 1fr}}
+  @container(max-width:330px){ha-card{padding:12px}.badge{padding:5px;font-size:8px}h2{font-size:18px}.driver-grid{grid-template-columns:1fr}}
+`;
+if (!customElements.get('f1-circle-of-doom-card')) customElements.define('f1-circle-of-doom-card', F1CircleOfDoomCard);
+window.customCards = window.customCards || [];
+if (!window.customCards.some(card => card.type === 'f1-circle-of-doom-card')) window.customCards.push({ type: 'f1-circle-of-doom-card', name: 'F1 Circle of Doom', description: 'Geschätztes Boxenstoppfenster aus öffentlichem F1-Timing, ohne F1TV.', preview: false });
