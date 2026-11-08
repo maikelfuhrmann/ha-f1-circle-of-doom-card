@@ -1,4 +1,4 @@
-/* F1 Circle of Doom Card v0.2.1 | MIT | maikelfuhrmann */
+/* F1 Circle of Doom Card v0.2.2 | MIT | maikelfuhrmann */
 /** Green defaults: Formula1.com race previews. VSC: heuristic 65% of green,
  * rounded to 0.1s; not measured VSC data. See docs/presets.md. */
 const CIRCUITS = [
@@ -343,7 +343,9 @@ function normaliseDrivers(input) {
     position: Number(d.current_position),
     gap: Number(d.current_position) === 1 ? 0 : seconds(d.gap_to_leader),
     gapLabel: String(d.gap_to_leader ?? ''),
-    lapped: /lap|runde/i.test(String(d.gap_to_leader ?? '')),
+    // "Lap 12" is the leader's current lap, whereas "+1 LAP" is a deficit.
+    // Unknown text remains a missing gap; never interpret a lap counter as lapping.
+    lapped: /^\+?\s*[1-9]\d*\s*(?:laps?|runden?)$/i.test(String(d.gap_to_leader ?? '').trim()),
     retired: d.retired === true || d.status === 'out',
     inPit: d.in_pit === true || d.pit_out === true || ['pit_in', 'pit_out'].includes(d.status),
     stopped: d.stopped === true,
