@@ -10,6 +10,24 @@ export function seconds(value) {
   return match ? Number(match[1]) * 60 + Number(match[2]) : null;
 }
 
+export function lapDeficit(value) {
+  const match = String(value ?? '').trim().match(/^\+?\s*([1-9]\d*)\s*(?:l|laps?|runden?)$/i);
+  return match ? Number(match[1]) : 0;
+}
+
+// Keep classification gaps unwrapped. Only a numeric interval can recover a
+// missing gap; a lap label alone is never converted using an assumed lap time.
+export function resolveGaps(drivers) {
+  return drivers.reduce((resolved, driver) => {
+    const previous = resolved.at(-1);
+    const chained = driver.gap === null && previous?.gap != null &&
+      driver.position === previous.position + 1 && Number.isFinite(driver.interval);
+    resolved.push({ ...driver, gap: chained ? previous.gap + driver.interval : driver.gap,
+      gapSource: chained ? 'intervals' : driver.gap === null ? 'missing' : 'timing' });
+    return resolved;
+  }, []);
+}
+
 export function normaliseDrivers(input) {
   if (!Array.isArray(input)) return [];
   return input.filter(d => d && typeof d === 'object').map(d => ({
@@ -22,7 +40,9 @@ export function normaliseDrivers(input) {
     gapLabel: String(d.gap_to_leader ?? ''),
     // "Lap 12" is the leader's current lap, whereas "+1 LAP" is a deficit.
     // Unknown text remains a missing gap; never interpret a lap counter as lapping.
-    lapped: /^\+?\s*[1-9]\d*\s*(?:laps?|runden?)$/i.test(String(d.gap_to_leader ?? '').trim()),
+    lapped: lapDeficit(d.gap_to_leader) > 0,
+    lapsBehind: lapDeficit(d.gap_to_leader),
+    interval: seconds(d.interval_to_position_ahead),
     retired: d.retired === true || d.status === 'out',
     inPit: d.in_pit === true || d.pit_out === true || ['pit_in', 'pit_out'].includes(d.status),
     stopped: d.stopped === true,
@@ -87,12 +107,24 @@ export function project(drivers, selected, loss, uncertainty) {
   };
 }
 
+export function trafficNeighbors(drivers, selected, target, lap) {
+  const wrap = value => ((value % lap) + lap) % lap;
+  const traffic = drivers.filter(d => d.id !== selected.id).map(driver => {
+    const offset = wrap(target - driver.gap);
+    const tied = offset < 0.001 || lap - offset < 0.001;
+    return { driver, aheadGap: tied ? 0 : offset, behindGap: tied ? 0 : lap - offset };
+  });
+  const nearest = key => [...traffic].sort((a,b) => Math.abs(a[key]-b[key]) < 0.001 ? a.driver.position-b.driver.position : a[key]-b[key])[0];
+  const ahead = nearest('aheadGap'), behind = nearest('behindGap');
+  return { ahead: ahead?.driver, behind: behind?.driver, aheadGap: ahead?.aheadGap, behindGap: behind?.behindGap };
+}
+
 export function buildModel(states, config, selectedId, now = Date.now(), overrides = {}) {
   const timing = states?.[config.entity];
   const session = states?.[config.session_entity];
   const status = states?.[config.session_status_entity];
   const track = states?.[config.track_status_entity];
-  const drivers = normaliseDrivers(timing?.attributes?.drivers).filter(d => !d.retired);
+  const drivers = resolveGaps(normaliseDrivers(timing?.attributes?.drivers)).filter(d => !d.retired);
   const selected = drivers.find(d => d.id === String(selectedId ?? config.driver ?? '')) ?? drivers[0];
   const settings = pitSettings(states, config, overrides);
   const base = { drivers, selected, settings, ready: false, lap: null, prediction: null,
@@ -111,13 +143,13 @@ export function buildModel(states, config, selectedId, now = Date.now(), overrid
   if (updated === null || now - updated > config.stale_after * 1000 || updated > now + 10000) return stop('stale', 'Timing data is stale or has no valid timestamp. Prediction paused.');
   if (drivers.length < 2) return stop('empty', 'Waiting for driver gaps.');
   if (drivers.some((d, i) => !d.id || d.position !== i + 1) || new Set(drivers.map(d => d.id)).size !== drivers.length) return stop('order', 'The running order is incomplete. Prediction paused.');
-  if (drivers.some(d => d.lapped)) return stop('lapped', 'Lapped cars in the field: A reliable rejoin prediction requires precise lap tracking.');
-  if (drivers.some(d => d.gap === null)) return stop('gaps', 'Time gaps are missing. Prediction paused until all active drivers can be placed.');
+  if (drivers.some(d => d.gap === null)) return stop('gaps', 'A time gap or numeric interval is missing. Lap labels alone cannot locate traffic. Waiting for complete timing.');
   if (drivers.some((d, i) => i > 0 && d.gap < drivers[i - 1].gap)) return stop('order', 'Time gaps and running order are not yet in sync.');
   if (drivers.some(d => d.inPit || d.stopped)) return stop('pit', 'A driver is in the pits, exiting the pits or stopped. Waiting for the running order to settle.');
   base.lap = referenceLap(drivers[0], config.reference_lap_seconds);
   if (base.lap === null) return stop('pace', 'Waiting for at least two usable lap times from the leader.');
-  if (drivers.some(d => d.gap >= base.lap) || selected.gap + settings.loss + config.uncertainty >= base.lap) return stop('lap_boundary', 'The window exceeds one reference lap. Prediction paused due to possible lapping.');
   return { ...base, ready: true, reason: 'estimate', message: settings.mode === 'vsc' ? 'VSC scenario · assumes VSC stays active for the entire stop.' : 'Estimate from time gaps · not GPS',
-    prediction: project(drivers, selected, settings.loss, config.uncertainty) };
+    prediction: project(drivers, selected, settings.loss, config.uncertainty),
+    traffic: trafficNeighbors(drivers, selected, selected.gap + settings.loss, base.lap),
+    recovered: drivers.filter(d => d.gapSource === 'intervals').length };
 }
