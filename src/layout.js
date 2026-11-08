@@ -1,23 +1,21 @@
-// Labels are spread independently of the timing markers. Markers never move off
-// their true time-gap angle, even when several cars have nearly identical gaps.
+// Timing markers stay at the exact gap angle; compact labels sit just above them.
 export function circlePoint(seconds, lap, radius = 125) {
   const angle = ((seconds % lap) + lap) % lap / lap * Math.PI * 2 - Math.PI / 2;
   return [220 + radius * Math.cos(angle), 220 + radius * Math.sin(angle)];
 }
 
-export function circleLabels(drivers, lap) {
-  const items = drivers.map(d => {
-    const pos = circlePoint(d.gap, lap);
-    return { id: d.id, pos, side: pos[0] < 220 ? 'left' : 'right', y: pos[1] };
-  });
-  for (const side of ['left', 'right']) {
-    const rows = items.filter(d => d.side === side).sort((a, b) => a.y - b.y);
-    const spacing = Math.min(17, 350 / Math.max(1, rows.length - 1));
-    let previous = 45 - spacing;
-    for (const row of rows) { row.y = Math.max(45, row.y, previous + spacing); previous = row.y; }
-    let next = 395 + spacing;
-    for (const row of rows.toReversed()) { row.y = Math.min(row.y, next - spacing); next = row.y; }
-    for (const row of rows) { row.y = Math.max(45, Math.min(395, row.y)); row.x = side === 'left' ? 51 : 389; row.elbow = side === 'left' ? 76 : 364; }
+export function circleLabels(drivers, lap, selectedId) {
+  const placed=[];
+  const items=drivers.map(d=>({id:d.id,pos:circlePoint(d.gap,lap),position:d.position||999}));
+  const priority=[...items].sort((a,b)=>(b.id===selectedId)-(a.id===selectedId)||a.position-b.position||String(a.id).localeCompare(String(b.id)));
+  for(const item of priority){
+    item.x=item.pos[0];item.y=item.pos[1]-14;item.hidden=true;
+    for(let lane=0;lane<3;lane++){
+      const y=item.pos[1]-14-lane*14;
+      if(!placed.some(other=>Math.abs(other.x-item.x)<34&&Math.abs(other.y-y)<13)){
+        item.y=y;item.hidden=false;placed.push(item);break;
+      }
+    }
   }
   return items;
 }
