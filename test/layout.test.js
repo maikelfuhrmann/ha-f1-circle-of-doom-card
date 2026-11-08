@@ -9,11 +9,12 @@ test('time scale places the leader at twelve and larger gaps clockwise',()=>{
   assert.equal(circlePoint(60,80)[0],95);
 });
 for(const gaps of [Array.from({length:22},(_,i)=>10+i*.01),Array.from({length:22},(_,i)=>i*3),Array(22).fill(40)]){
-  test('22-car labels stay separated and bounded while markers retain exact gaps '+gaps[0],()=>{
-    const drivers=gaps.map((gap,i)=>({id:String(i),gap})),labels=circleLabels(drivers,80);
-    assert.equal(labels.length,22);
-    for(const l of labels){assert.deepEqual(l.pos,circlePoint(drivers[Number(l.id)].gap,80));assert.ok(l.y>=45&&l.y<=395);}
-    for(const side of ['left','right']){const ys=labels.filter(l=>l.side===side).map(l=>l.y).sort((a,b)=>a-b);for(let i=1;i<ys.length;i++)assert.ok(ys[i]-ys[i-1]>=16);}
+  test('compact labels keep exact marker positions and prioritize the selected driver '+gaps[0],()=>{
+    const drivers=gaps.map((gap,i)=>({id:String(i),gap})),labels=circleLabels(drivers,80,'21');
+    assert.equal(labels.length,22);assert.equal(labels.find(l=>l.id==='21').hidden,false);
+    for(const l of labels){assert.deepEqual(l.pos,circlePoint(drivers[Number(l.id)].gap,80));assert.equal(l.x,l.pos[0]);assert.ok(l.pos[1]-l.y>=14&&l.pos[1]-l.y<=42);}
+    const visible=labels.filter(l=>!l.hidden);
+    for(let i=0;i<visible.length;i++)for(let j=i+1;j<visible.length;j++)assert.ok(Math.abs(visible[i].x-visible[j].x)>=34||Math.abs(visible[i].y-visible[j].y)>=13);
   });
 }
 
