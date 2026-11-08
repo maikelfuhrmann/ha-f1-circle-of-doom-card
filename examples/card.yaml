@@ -4,7 +4,10 @@ entity: sensor.f1_driver_positions
 session_entity: sensor.f1_current_session
 session_status_entity: sensor.f1_session_status
 track_status_entity: sensor.f1_track_status
+auto_pit_loss: true
+# Used only when no circuit preset is available:
 pit_loss: 22
+vsc_pit_loss: 14.3
 uncertainty: 2
 stale_after: 90
 grid_options:
