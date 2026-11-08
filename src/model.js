@@ -1,3 +1,5 @@
+import { pitSettings } from './presets.js';
+
 /** Pure timing model. All inputs are HA entity snapshots; no network access. */
 export function seconds(value) {
   if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? value : null;
@@ -14,7 +16,7 @@ export function normaliseDrivers(input) {
     id: String(d.racing_number ?? d.tla ?? ''),
     code: String(d.tla ?? d.racing_number ?? '?'),
     name: String(d.name ?? d.tla ?? '?'),
-    color: /^#?[0-9a-f]{6}$/i.test(d.team_color ?? '') ? `#${d.team_color.replace('#', '')}` : '#94a3b8',
+    color: typeof d.team_color === 'string' && /^#?[0-9a-f]{6}$/i.test(d.team_color) ? `#${d.team_color.replace('#', '')}` : '#94a3b8',
     position: Number(d.current_position),
     gap: Number(d.current_position) === 1 ? 0 : seconds(d.gap_to_leader),
     gapLabel: String(d.gap_to_leader ?? ''),
@@ -44,21 +46,23 @@ export function timestamp(entity) {
 }
 
 export function validateConfig(config) {
-  if (!config || !config.entity) throw new Error('Timing-Entity fehlt: entity: sensor.f1_driver_positions');
+  if (!config || !config.entity) throw new Error('Missing timing entity: entity: sensor.f1_driver_positions');
   for (const key of ['entity', 'session_entity', 'session_status_entity', 'track_status_entity']) {
     if (typeof config[key] !== 'string' || !/^sensor\.[a-z0-9_]+$/.test(config[key])) {
-      throw new Error(`${key}: Bitte eine passende Sensor-Entity angeben.`);
+      throw new Error(`${key}: Please provide a valid sensor entity.`);
     }
   }
-  const c = { title: 'Circle of Doom', pit_loss: 22, uncertainty: 2, stale_after: 90, ...config };
-  for (const [key, min, max] of [['pit_loss', 1, 120], ['uncertainty', 0, 30], ['stale_after', 15, 600]]) {
+  const c = { title: 'Circle of Doom', auto_pit_loss: true, pit_loss: 22, vsc_pit_loss: 14.3, uncertainty: 2, stale_after: 90, ...config };
+  if (typeof c.auto_pit_loss !== 'boolean') throw new Error('auto_pit_loss must be true or false.');
+  for (const key of ['circuit', 'storage_key']) if (c[key] != null && (typeof c[key] !== 'string' || !c[key].trim())) throw new Error(`${key} must be a non-empty string.`);
+  for (const [key, min, max] of [['pit_loss', 1, 120], ['vsc_pit_loss', 1, 120], ['uncertainty', 0, 30], ['stale_after', 15, 600]]) {
     if (typeof c[key] !== 'number' || !Number.isFinite(c[key]) || c[key] < min || c[key] > max) {
-      throw new Error(`${key} muss eine Zahl zwischen ${min} und ${max} sein.`);
+      throw new Error(`${key} must be a number between ${min} and ${max}.`);
     }
   }
-  if (c.uncertainty >= c.pit_loss) throw new Error('uncertainty muss kleiner als pit_loss sein.');
+  if (c.uncertainty >= c.pit_loss) throw new Error('uncertainty must be less than pit_loss.');
   if (c.reference_lap_seconds != null && (typeof c.reference_lap_seconds !== 'number' || !Number.isFinite(c.reference_lap_seconds) || c.reference_lap_seconds < 35 || c.reference_lap_seconds > 240)) {
-    throw new Error('reference_lap_seconds muss zwischen 35 und 240 liegen.');
+    throw new Error('reference_lap_seconds must be between 35 and 240.');
   }
   return c;
 }
@@ -78,35 +82,37 @@ export function project(drivers, selected, loss, uncertainty) {
   };
 }
 
-export function buildModel(states, config, selectedId, now = Date.now()) {
+export function buildModel(states, config, selectedId, now = Date.now(), overrides = {}) {
   const timing = states?.[config.entity];
   const session = states?.[config.session_entity];
   const status = states?.[config.session_status_entity];
   const track = states?.[config.track_status_entity];
   const drivers = normaliseDrivers(timing?.attributes?.drivers).filter(d => !d.retired);
   const selected = drivers.find(d => d.id === String(selectedId ?? config.driver ?? '')) ?? drivers[0];
-  const base = { drivers, selected, ready: false, lap: null, prediction: null,
+  const settings = pitSettings(states, config, overrides);
+  const base = { drivers, selected, settings, ready: false, lap: null, prediction: null,
     updated: timestamp(timing), track: track?.state ?? 'unknown', session: session?.state ?? 'unknown' };
   const stop = (reason, message) => ({ ...base, reason, message });
-  if (!timing || !session || !status || !track) return stop('configuration', 'Timing-, Session- und Streckenstatus-Sensoren zuordnen und in F1 Sensor aktivieren.');
-  if (status.state !== 'live') return stop('idle', 'Wartet auf ein laufendes Rennen oder einen Sprint.');
-  if (!['Race', 'Sprint'].includes(session.state)) return stop('session', 'Das Boxenstoppfenster ist nur für Rennen und Sprint verfügbar.');
-  if (track.state !== 'CLEAR') return stop('track', ['SC', 'VSC', 'RED', 'YELLOW'].includes(track.state)
-    ? `Prognose pausiert: ${track.state}. Die Abstände und der Boxenstoppverlust sind unter diesen Bedingungen nicht verlässlich.`
-    : 'Streckenstatus fehlt. Keine Prognose möglich.');
-  if (session.attributes?.active === false || ['unknown', 'unavailable'].includes(timing.state)) return stop('idle', 'Keine aktuellen Timing-Daten verfügbar.');
+  if (!timing || !session || !status || !track) return stop('configuration', 'Assign the timing, session and track status sensors, and enable them in F1 Sensor.');
+  if (status.state !== 'live') return stop('idle', 'Waiting for a live race or sprint.');
+  if (!['Race', 'Sprint'].includes(session.state)) return stop('session', 'The pit window is only available during races and sprints.');
+  if (!['CLEAR', 'VSC'].includes(track.state)) return stop('track', ['SC', 'RED', 'YELLOW'].includes(track.state)
+    ? `Prediction paused: ${track.state}. Gaps and pit loss are unreliable in these conditions.`
+    : 'Track status is unavailable. No prediction possible.');
+  if (session.attributes?.active === false || ['unknown', 'unavailable'].includes(timing.state)) return stop('idle', 'No current timing data available.');
+  if (config.uncertainty >= settings.loss) return stop('settings', 'Uncertainty must be less than the active pit loss. Adjust the values above.');
   // Timing changes continuously. Stable status entities can legitimately have old last_updated.
   const updated = timestamp(timing);
-  if (updated === null || now - updated > config.stale_after * 1000 || updated > now + 10000) return stop('stale', 'Timing-Daten sind veraltet oder ohne gültigen Zeitstempel. Prognose pausiert.');
-  if (drivers.length < 2) return stop('empty', 'Wartet auf die Abstände der Fahrer.');
-  if (drivers.some((d, i) => !d.id || d.position !== i + 1) || new Set(drivers.map(d => d.id)).size !== drivers.length) return stop('order', 'Die Fahrerreihenfolge ist unvollständig. Prognose pausiert.');
-  if (drivers.some(d => d.lapped)) return stop('lapped', 'Überrundete Fahrer im Feld: Ohne genaue Rundenzuordnung ist keine sichere Rückkehrprognose möglich.');
-  if (drivers.some(d => d.gap === null)) return stop('gaps', 'Zeitabstände fehlen. Prognose pausiert, bis alle aktiven Fahrer zugeordnet werden können.');
-  if (drivers.some((d, i) => i > 0 && d.gap < drivers[i - 1].gap)) return stop('order', 'Zeitabstände und Reihenfolge sind noch nicht synchron.');
-  if (drivers.some(d => d.inPit || d.stopped)) return stop('pit', 'Ein Fahrer ist in der Box, auf der Ausfahrt oder angehalten. Das Feld muss sich zuerst neu sortieren.');
+  if (updated === null || now - updated > config.stale_after * 1000 || updated > now + 10000) return stop('stale', 'Timing data is stale or has no valid timestamp. Prediction paused.');
+  if (drivers.length < 2) return stop('empty', 'Waiting for driver gaps.');
+  if (drivers.some((d, i) => !d.id || d.position !== i + 1) || new Set(drivers.map(d => d.id)).size !== drivers.length) return stop('order', 'The running order is incomplete. Prediction paused.');
+  if (drivers.some(d => d.lapped)) return stop('lapped', 'Lapped cars in the field: A reliable rejoin prediction requires precise lap tracking.');
+  if (drivers.some(d => d.gap === null)) return stop('gaps', 'Time gaps are missing. Prediction paused until all active drivers can be placed.');
+  if (drivers.some((d, i) => i > 0 && d.gap < drivers[i - 1].gap)) return stop('order', 'Time gaps and running order are not yet in sync.');
+  if (drivers.some(d => d.inPit || d.stopped)) return stop('pit', 'A driver is in the pits, exiting the pits or stopped. Waiting for the running order to settle.');
   base.lap = referenceLap(drivers[0], config.reference_lap_seconds);
-  if (base.lap === null) return stop('pace', 'Wartet auf mindestens zwei verwertbare Rundenzeiten des Führenden.');
-  if (drivers.some(d => d.gap >= base.lap) || selected.gap + config.pit_loss + config.uncertainty >= base.lap) return stop('lap_boundary', 'Das Fenster überschreitet eine Referenzrunde. Prognose wegen möglicher Überrundung pausiert.');
-  return { ...base, ready: true, reason: 'estimate', message: 'Schätzung aus Zeitabständen · kein GPS',
-    prediction: project(drivers, selected, config.pit_loss, config.uncertainty) };
+  if (base.lap === null) return stop('pace', 'Waiting for at least two usable lap times from the leader.');
+  if (drivers.some(d => d.gap >= base.lap) || selected.gap + settings.loss + config.uncertainty >= base.lap) return stop('lap_boundary', 'The window exceeds one reference lap. Prediction paused due to possible lapping.');
+  return { ...base, ready: true, reason: 'estimate', message: settings.mode === 'vsc' ? 'VSC scenario · assumes VSC stays active for the entire stop.' : 'Estimate from time gaps · not GPS',
+    prediction: project(drivers, selected, settings.loss, config.uncertainty) };
 }
