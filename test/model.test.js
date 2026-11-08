@@ -20,7 +20,7 @@ test('leader projection excludes self and counts equal-gap competitor ahead',()=
 });
 test('other selected driver uses its own gap and counts only competitors',()=>{ const m=model(data(),'2'); assert.equal(m.prediction.rank,5); assert.equal(m.prediction.target,26); });
 test('window can keep a driver in first when gap is sufficient',()=>{const s=data();s['sensor.timing'].attributes.drivers=s['sensor.timing'].attributes.drivers.slice(0,2);s['sensor.timing'].attributes.drivers[1].gap_to_leader='+30';assert.equal(model(s).prediction.rank,1);});
-for(const track of ['SC','VSC','RED','YELLOW','unavailable']) test(`no prediction for ${track}`,()=>{const s=data();s['sensor.track'].state=track;assert.equal(model(s).reason,'track');assert.equal(model(s).prediction,null);});
+for(const track of ['SC','RED','YELLOW','unavailable']) test(`no prediction for ${track}`,()=>{const s=data();s['sensor.track'].state=track;assert.equal(model(s).reason,'track');assert.equal(model(s).prediction,null);});
 for(const state of ['pre','finished','ended','suspended','unknown']) test(`no prediction when session ${state}`,()=>{const s=data();s['sensor.status'].state=state;assert.equal(model(s).ready,false);});
 test('qualifying is not a race; sprint is supported',()=>{const s=data();s['sensor.session'].state='Qualifying';assert.equal(model(s).reason,'session');s['sensor.session'].state='Sprint';assert.equal(model(s).ready,true);});
 test('stale data and future clocks suppress prediction; old stable status is valid',()=>{
@@ -37,3 +37,20 @@ test('requires two recent laps and ignores unavailable times',()=>{assert.equal(
 test('crossing reference lap boundary blocks misleading rejoin estimate',()=>{const s=data();assert.equal(model(s,'6',{...config,pit_loss:40}).reason,'lap_boundary');});
 test('config rejects bad numbers and non-sensor entities',()=>{for(const c of [{pit_loss:NaN},{pit_loss:-2},{uncertainty:22},{stale_after:0},{entity:'light.test'},{reference_lap_seconds:'70'}]) assert.throws(()=>validateConfig({...config,...c}));});
 test('unavailable entity cannot retain a seemingly live projection',()=>{const s=data();s['sensor.timing'].state='unavailable';assert.equal(model(s).ready,false);});
+
+test('active VSC uses its own pit loss and returns to green without changing normal settings',()=>{
+  const s=data();s['sensor.session'].attributes.circuit_short_name='Interlagos';
+  const overrides={interlagos:{green:23,vsc:12}};
+  let m=buildModel(s,config,'1',now,overrides);assert.equal(m.prediction.target,23);
+  s['sensor.track'].state='VSC';m=buildModel(s,config,'1',now,overrides);
+  assert.equal(m.ready,true);assert.equal(m.settings.mode,'vsc');assert.equal(m.prediction.target,12);assert.match(m.message,/entire stop/);
+  s['sensor.track'].state='CLEAR';m=buildModel(s,config,'1',now,overrides);assert.equal(m.prediction.target,23);
+});
+test('VSC retains stale-data, pit-activity and session guards',()=>{
+  const s=data();s['sensor.track'].state='VSC';s['sensor.timing'].last_updated=new Date(now-91000).toISOString();assert.equal(model(s).reason,'stale');
+  s['sensor.timing'].last_updated=new Date(now).toISOString();s['sensor.timing'].attributes.drivers[1].in_pit=true;assert.equal(model(s).reason,'pit');
+  s['sensor.status'].state='ended';assert.equal(model(s).ready,false);
+});
+test('uncertainty beyond active circuit loss blocks projection',()=>{
+  const s=data();s['sensor.track'].state='VSC';assert.equal(model(s,'1',{...config,uncertainty:15}).reason,'settings');
+});
